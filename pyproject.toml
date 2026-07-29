@@ -53,7 +53,7 @@ pytti = "pytti.workhorse:_main"
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "ruff>=0.5",
+    "ruff~=0.16.0",  # pinned: lint verdicts must match between local and CI
     "pyright>=1.1.380",
 ]
 
