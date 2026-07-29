@@ -1,30 +1,14 @@
 from pathlib import Path
 
+from hydra import compose, initialize
+
 import pytest
 from loguru import logger
 
 from pytti.config.model_names import VQGAN_MODEL_NAMES
 from pytti.image_models.vqgan import VQGANImage
+from pytti.Perceptor import _sanitize_for_config, load_clip
 
-# vqgan
-
-"""
-@pytest.mark.parametrize(
-    "model_name",
-    VQGAN_MODEL_NAMES,
-)
-def test_load_vqgan_no_download(model_name):
-    VQGAN_MODEL, VQGAN_IS_GUMBEL = None, None
-    #vqgan_config, vqgan_checkpoint = VQGAN_CONFIG_URLS[model_name], VQGAN_CHECKPOINT_URLS[model_name]
-    vqgan_config = model_artifacts_path / f"{model_name}.yaml"
-    vqgan_checkpoint = model_artifacts_path / f"{model_name}.ckpt"
-    VQGAN_MODEL, VQGAN_IS_GUMBEL = load_vqgan_model(vqgan_config, vqgan_checkpoint)
-    assert VQGAN_MODEL is not None
-    assert VQGAN_IS_GUMBEL is not None
-"""
-
-# cannibalized from e2e tests
-from hydra import compose, initialize
 
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
@@ -58,8 +42,6 @@ class Test_VQGANImage:
 ########################################
 
 # clip
-
-from pytti.Perceptor import _sanitize_for_config, load_clip
 
 pytestmark = pytest.mark.download
 
