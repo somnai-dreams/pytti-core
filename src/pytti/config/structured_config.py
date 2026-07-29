@@ -1,22 +1,38 @@
+"""
+The canonical pytti config schema — the single source of every setting and
+its default. assets/default.yaml only selects this schema and the demo
+values; presets override on top. Composed into every run via Hydra's
+ConfigStore, so unknown keys and invalid values fail at startup with a
+message instead of surfacing as AttributeErrors mid-render.
+"""
+
 
 from attrs import define, field
 from hydra.core.config_store import ConfigStore
+from omegaconf import MISSING
 
 from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 
+# bump when the set of config keys changes; drives ./config migration
+CONFIG_VERSION = 2
 
-def check_input_against_list(attribute, value, valid_values):
-    if value not in valid_values:
-        raise ValueError(
-            f"{value} is not a valid input for {attribute.name} Valid inputs are {valid_values}"
-        )
+
+def _choice(valid_values):
+    def validator(self, attribute, value):
+        if value not in valid_values:
+            raise ValueError(
+                f"{value!r} is not a valid value for {attribute.name}. "
+                f"Valid values: {list(valid_values)}"
+            )
+
+    return validator
 
 
 @define(auto_attribs=True)
 class AudioFilterConfig:
     variable_name: str = ""
-    f_center: int = -1
-    f_width: int = -1
+    f_center: float = -1
+    f_width: float = -1
     order: int = 5
 
 
@@ -25,7 +41,8 @@ class ConfigSchema:
     #############
     ## Prompts ##
     #############
-    scenes: str = ""
+
+    scenes: str = MISSING
     scene_prefix: str = ""
     scene_suffix: str = ""
 
@@ -34,63 +51,39 @@ class ConfigSchema:
     direct_init_weight: str = ""
     semantic_init_weight: str = ""
 
-    ##################################
+    ###################
+    ## Image & model ##
+    ###################
 
-    image_model: str = field(default="Unlimited Palette")
-    vqgan_model: str = field(default="sflickr")
-    animation_mode: str = field(default="off")
+    image_model: str = field(
+        default="Unlimited Palette",
+        validator=_choice(["Unlimited Palette", "Limited Palette", "VQGAN"]),
+    )
+    vqgan_model: str = field(
+        default="sflickr",
+        validator=_choice(VQGAN_MODEL_NAMES + list(VQGAN_MODEL_ALIASES)),
+    )
+    animation_mode: str = field(
+        default="off", validator=_choice(["off", "2D", "3D", "Video Source"])
+    )
 
-    @image_model.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute,
-            value,
-            valid_values=[
-                "Unlimited Palette",
-                "Limited Palette",
-                "VQGAN",
-            ],
-        )
-
-    # I feel like there should be a better way to do this...
-    @vqgan_model.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute,
-            value,
-            valid_values=VQGAN_MODEL_NAMES + list(VQGAN_MODEL_ALIASES),
-        )
-
-    @animation_mode.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute, value, valid_values=["off", "2D", "3D", "Video Source"]
-        )
-
-    ##################################
-
-    width: int = 180
-    height: int = 112
+    width: int = 512
+    height: int = 512
 
     steps_per_scene: int = 100
     steps_per_frame: int = 50
     interpolation_steps: int = 0
 
-    learning_rate: float | None = None  # based on pytti.Image.DifferentiableImage
+    learning_rate: float | None = None
     reset_lr_each_frame: bool = True
-    seed: str = "${now:%f}"  # microsecond component of timestamp. Basically random.
+    seed: int | None = None  # None = a fresh random seed each run
     cutouts: int = 40
-    cut_pow: int = 2
+    cut_pow: float = 2
     cutout_border: float = 0.25
-    border_mode: str = field(default="clamp")
-
-    @border_mode.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute, value, valid_values=["clamp", "mirror", "wrap", "black", "smear"]
-        )
-
-    ##################################
+    border_mode: str = field(
+        default="clamp",
+        validator=_choice(["clamp", "mirror", "wrap", "black", "smear"]),
+    )
 
     ##########
     # Camera #
@@ -100,16 +93,20 @@ class ConfigSchema:
     near_plane: int = 1
     far_plane: int = 10000
 
+    #######################
+    ### Audioreactivity ###
+    #######################
+
+    input_audio: str = ""
+    input_audio_offset: float = 0
+    # None means no filters (omegaconf cannot ingest attrs list factories)
+    input_audio_filters: list[AudioFilterConfig] | None = None
+
     ######################
     ### Induced Motion ###
     ######################
 
-    input_audio: str = ""
-    input_audio_offset: float = 0
-    input_audio_filters: AudioFilterConfig | None = None
-
     #  _2d and _3d only apply to those animation modes
-
     translate_x: str = "0"
     translate_y: str = "0"
     translate_z_3d: str = "0"
@@ -118,46 +115,34 @@ class ConfigSchema:
     zoom_x_2d: str = "0"
     zoom_y_2d: str = "0"
 
-    sampling_mode: str = field(default="bicubic")
+    sampling_mode: str = field(
+        default="bicubic", validator=_choice(["nearest", "bilinear", "bicubic"])
+    )
+    infill_mode: str = field(
+        default="wrap", validator=_choice(["mirror", "wrap", "black", "smear"])
+    )
 
-    @sampling_mode.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute, value, valid_values=["nearest", "bilinear", "bicubic"]
-        )
-
-    infill_mode: str = field(default="wrap")
-
-    @infill_mode.validator
-    def check(self, attribute, value):
-        check_input_against_list(
-            attribute, value, valid_values=["mirror", "wrap", "black", "smear"]
-        )
-
-    pre_animation_steps: int = 100
+    pre_animation_steps: int = 50
     lock_camera: bool = True
-
-    ##################################
 
     #######################
     ### Limited Palette ###
     #######################
 
-    pixel_size: int = 4
+    pixel_size: int = 1
     smoothing_weight: float = 0.02
     random_initial_palette: bool = False
-    palette_size: int = 6
-    palettes: int = 9
-    gamma: int = 1
+    palette_size: int = 5
+    palettes: int = 20
+    gamma: float = 1
     hdr_weight: float = 0.01
     palette_normalization_weight: float = 0.2
-    show_palette: bool = False
     target_palette: str = ""
     lock_palette: bool = False
 
-    ##############
-    ### ffmpeg ###
-    ##############
+    #####################
+    ### Stabilization ###
+    #####################
 
     frames_per_second: int = 12
 
@@ -183,6 +168,7 @@ class ConfigSchema:
     ViTB32: bool = True
     ViTB16: bool = False
     ViTL14: bool = False
+    ViTL14_336px: bool = False
     RN50: bool = False
     RN101: bool = False
     RN50x4: bool = False
@@ -196,16 +182,17 @@ class ConfigSchema:
     file_namespace: str = "default"
     allow_overwrite: bool = False
     display_every: int = 50
-    clear_every: int = 0
-    display_scale: int = 1
     save_every: int = 50
 
-    backups: int = 0
-    show_graphs: bool = False
-    approximate_vram_usage: bool = False
-    use_tensorboard: bool | None = False
+    # crossfade saved frames from init_image to the optimized output over the
+    # course of the render (requires init_image)
+    breath_mode: bool = False
 
-    #####################################
+    backups: int = 3
+    approximate_vram_usage: bool = False
+
+    # resume from the latest backup in backup/<file_namespace>/
+    restore: bool = False
 
     #################
     ### Model I/O ###
@@ -216,13 +203,16 @@ class ConfigSchema:
     # If the expected model artifacts are not present, pytti will attempt to download them.
     models_parent_dir: str = "${user_cache:}"
 
-    ######################################
-
     ##########################
     ### Performance tuning ###
     ##########################
 
     gradient_accumulation_steps: int = 1
+    # None = auto (cuda > mps > cpu); or e.g. "cuda:1", "mps", "cpu"
+    device: str | None = None
+
+    # version of the local ./config format; used for migration
+    config_version: int = CONFIG_VERSION
 
 
 def register():

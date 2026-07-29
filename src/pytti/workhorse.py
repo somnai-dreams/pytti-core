@@ -4,6 +4,7 @@ CLI rendering entry point. Hydra composes the config, `do_run` executes it.
 
 import gc
 import os
+import random
 import re
 from pathlib import Path
 
@@ -23,6 +24,10 @@ from pytti import (
     vram_profiling,
     vram_usage_mode,
 )
+
+# importing the module registers ConfigSchema in Hydra's ConfigStore, which
+# default.yaml composes as its base
+from pytti.config import structured_config  # noqa: F401
 from pytti.files import get_last_file, get_next_file
 from pytti.image_models import PixelImage, RGBImage, VQGANImage
 from pytti.ImageGuide import DirectImageGuide
@@ -36,8 +41,11 @@ from pytti.Perceptor.Embedder import HDMultiClipEmbedder
 from pytti.Perceptor.Prompt import parse_prompt
 from pytti.prompt_spec import parse_prompt_spec
 from pytti.rotoscoper import ROTOSCOPERS, get_frames
-from pytti.update_func import update
-from pytti.warmup import ensure_configs_exist, register_resolvers
+from pytti.warmup import (
+    ensure_configs_exist,
+    migrate_local_config,
+    register_resolvers,
+)
 
 
 def parse_scenes(
@@ -142,11 +150,10 @@ def _hydra_main(cfg: DictConfig):
     logger.debug(OmegaConf.to_container(cfg, resolve=True))
     latest = -1
 
-    # @markdown check `restore` to restore from a previous run
-    restore = params.get("restore") or False
-    # @markdown check `reencode` if you are restoring with a modified image or modified image settings
+    restore = params.restore
+    # reencode: restore from the saved PNG instead of the model state backup
+    # (useful if image settings changed); not yet exposed in config
     reencode = False
-    # @markdown which run to restore
     restore_run = latest
 
     # NB: `backup/` dir probably not working at present
@@ -169,8 +176,11 @@ def _hydra_main(cfg: DictConfig):
         restore_frame = latest
 
         # set up seed for deterministic RNG
-        if params.seed is not None:
-            torch.manual_seed(params.seed)
+        if params.seed is None:
+            with open_dict(params) as p:
+                p.seed = random.randint(0, 2**32 - 1)
+            logger.info(f"Using random seed {params.seed}")
+        torch.manual_seed(params.seed)
 
         # Phase 2 - load and parse
         ###########################
@@ -410,7 +420,6 @@ def _hydra_main(cfg: DictConfig):
             init_augs=init_augs,
             semantic_init_prompt=semantic_init_prompt,
         )
-        model.update = update
 
         # Run the training loop
         ########################
@@ -454,6 +463,7 @@ def _hydra_main(cfg: DictConfig):
 def _main():
     register_resolvers()
     ensure_configs_exist()
+    migrate_local_config()
     _hydra_main()
 
 
