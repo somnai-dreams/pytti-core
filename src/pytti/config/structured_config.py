@@ -31,8 +31,9 @@ def _choice(valid_values):
 @define(auto_attribs=True)
 class AudioFilterConfig:
     variable_name: str = ""
-    f_center: float = -1
-    f_width: float = -1
+    # None = unset; validated loudly when audio is actually used
+    f_center: float | None = None
+    f_width: float | None = None
     order: int = 5
 
 
@@ -182,8 +183,10 @@ class ConfigSchema:
     file_namespace: str = "default"
     allow_overwrite: bool = False
     display_every: int = 50
-    # 0 = save one frame per animation frame (steps_per_frame)
-    save_every: int = 50
+    # 0 = save one frame per animation frame (steps_per_frame). The 0-default
+    # keeps saved frames locked to animation frames even when steps_per_frame
+    # changes — a manual value is an explicit override.
+    save_every: int = 0
 
     # crossfade saved frames from init_image to the optimized output over the
     # course of the render (requires init_image)

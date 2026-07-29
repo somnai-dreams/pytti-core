@@ -114,12 +114,17 @@ class SpectralAudioParser:
 
 def _validate_filter(filt):
     nyquist = SAMPLERATE / 2
-    lower = filt.f_center - filt.f_width / 2
-    upper = filt.f_center + filt.f_width / 2
     if not filt.variable_name:
         raise ValueError(
             "Every audio filter needs a variable_name to expose to expressions"
         )
+    if filt.f_center is None or filt.f_width is None:
+        raise ValueError(
+            f"Audio filter {filt.variable_name!r} needs both f_center and "
+            "f_width set (in Hz)"
+        )
+    lower = filt.f_center - filt.f_width / 2
+    upper = filt.f_center + filt.f_width / 2
     if not 0 < lower < upper < nyquist:
         raise ValueError(
             f"Audio filter {filt.variable_name!r} has an invalid band: "
