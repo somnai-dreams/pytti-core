@@ -1,35 +1,30 @@
-from collections import defaultdict
-import re
 import math
-from typing import Callable
+from collections.abc import Callable
 
-from loguru import logger
-
-from PIL import Image
-import numpy as np
-from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
 import torch
+from clip import clip
+from PIL import Image
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
 from torch import nn
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
-from clip import clip
 import pytti
 from pytti import (
-    format_input,
     cat_with_pad,
-    replace_grad,
     fetch,
-    parse,
+    format_input,
     parametric_eval,
+    parse,
+    replace_grad,
     vram_usage_mode,
 )
+from pytti.device import default_device
 from pytti.image_models import RGBImage
 
 # from pytti.Notebook import Rotoscoper
 from pytti.rotoscoper import Rotoscoper
-from pytti.device import default_device
 
 
 def spherical_dist_loss(x, y):

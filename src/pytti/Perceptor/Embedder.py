@@ -1,23 +1,20 @@
-from typing import Tuple
-
-import pytti
-from pytti import format_input, cat_with_pad, format_module, normalize
-
-# from pytti.ImageGuide import DirectImageGuide
-from pytti.image_models import DifferentiableImage
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+import pytti
+from pytti import cat_with_pad, format_input, format_module, normalize
+from pytti.device import default_device
+
+# from pytti.ImageGuide import DirectImageGuide
+from pytti.image_models import DifferentiableImage
 
 # import .cutouts
 # import .cutouts as cutouts
 # import cutouts
-
 from .cutouts import augs as cutouts_augs
 from .cutouts import samplers as cutouts_samplers
-from pytti.device import default_device
 
 PADDING_MODES = {
     "mirror": "reflect",
@@ -77,7 +74,7 @@ class HDMultiClipEmbedder(nn.Module):
         # noise_fac,
         ####
         device=None,
-    ) -> Tuple[list, list, list]:
+    ) -> tuple[list, list, list]:
         if device is None:
             device = self.device
         cutouts, offsets, sizes = cutouts_samplers.pytti_classic(
@@ -101,7 +98,7 @@ class HDMultiClipEmbedder(nn.Module):
         diff_image: DifferentiableImage,
         input=None,
         device=None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         diff_image: (DifferentiableImage) input image
         returns images embeds

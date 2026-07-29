@@ -65,7 +65,7 @@ class Test_VQGANImage:
 
 # clip
 
-from pytti.Notebook import load_clip, _sanitize_for_config
+from pytti.Perceptor import load_clip, _sanitize_for_config
 
 
 def test_load_clip_w_at_symbol_in_identifier():

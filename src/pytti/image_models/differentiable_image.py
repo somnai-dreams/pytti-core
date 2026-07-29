@@ -1,7 +1,9 @@
 import copy
-from torch import nn
+
 import numpy as np
 from PIL import Image
+from torch import nn
+
 from pytti.tensor_tools import named_rearrange
 
 SUPPORTED_MODES = ["L", "RGB", "I", "F"]
@@ -20,7 +22,7 @@ class DifferentiableImage(nn.Module):
         if pixel_format not in SUPPORTED_MODES:
             raise ValueError(f"Pixel format {pixel_format} is not supported.")
         self.image_shape = (width, height)
-        self.pixel_format = format
+        self.pixel_format = pixel_format
         self.output_axes = ("x", "y", "s")
         self.lr = 0.02
         self.latent_strength = 0
@@ -111,12 +113,3 @@ class DifferentiableImage(nn.Module):
             .astype(np.uint8)[:, :, :]
         )
         return Image.fromarray(array)
-
-    def forward(self):
-        """
-        returns a decoded tensor of this image
-        """
-        if self.training:
-            return self.decode_training_tensor()
-        else:
-            return self.decode_tensor()

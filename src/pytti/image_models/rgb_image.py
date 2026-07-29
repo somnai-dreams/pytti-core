@@ -1,11 +1,12 @@
-from pytti import clamp_with_grad
 import torch
-from torch import nn
-from torchvision.transforms import functional as TF
-from pytti.image_models import DifferentiableImage
 from PIL import Image
+from torch import nn
 from torch.nn import functional as F
+from torchvision.transforms import functional as TF
+
+from pytti import clamp_with_grad
 from pytti.device import default_device
+from pytti.image_models import DifferentiableImage
 
 
 class RGBImage(DifferentiableImage):

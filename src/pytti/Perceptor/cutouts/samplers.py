@@ -12,29 +12,6 @@ should be sufficiently general for use in notebooks without pyttitools otherwise
 import torch
 from torch.nn import functional as F
 
-PADDING_MODES = {
-    "mirror": "reflect",
-    "smear": "replicate",
-    "wrap": "circular",
-    "black": "constant",
-}
-
-# (
-# cut_size = 64
-# cut_pow = 0.5
-# noise_fac = 0.0
-# cutn = 8
-# border_mode = "clamp"
-# augs = None
-# return Cutout(
-#     cut_size=cut_size,
-#     cut_pow=cut_pow,
-#     noise_fac=noise_fac,
-#     cutn=cutn,
-#     border_mode=border_mode,
-#     augs=augs,
-# )
-
 
 def pytti_classic(
     # self,
@@ -53,7 +30,6 @@ def pytti_classic(
     """
     This is the cutout method that was already in use in the original pytti.
     """
-    min_size = min(side_x, side_y, cut_size)
     max_size = min(side_x, side_y)
     paddingx = min(round(side_x * padding), side_x)
     paddingy = min(round(side_y * padding), side_y)

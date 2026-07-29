@@ -1,16 +1,17 @@
 
-from pytti import named_rearrange, replace_grad, vram_usage_mode
-from pytti.image_models.differentiable_image import DifferentiableImage
-from pytti.LossAug.HSVLossClass import HSVLoss
 
 # from pytti.ImageGuide import DirectImageGuide
 import numpy as np
-import torch, math
+import torch
+from PIL import Image
 from torch import nn, optim
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
-from PIL import Image, ImageOps
+
+from pytti import named_rearrange, replace_grad, vram_usage_mode
 from pytti.device import default_device
+from pytti.image_models.differentiable_image import DifferentiableImage
+from pytti.LossAug.HSVLossClass import HSVLoss
 
 
 def break_tensor(tensor):
@@ -34,15 +35,15 @@ def break_tensor(tensor):
     return floors, ceils, rounds, fracs
 
 
-class PalletLoss(nn.Module):
+class PaletteLoss(nn.Module):
     """Palette normalization"""
 
-    def __init__(self, n_pallets, weight=0.15, device=None):
+    def __init__(self, n_palettes, weight=0.15, device=None):
         super().__init__()
         if device is None:
             device = default_device()
         self.device = device
-        self.n_pallets = n_pallets
+        self.n_palettes = n_palettes
         self.register_buffer("weight", torch.as_tensor(weight).to(self.device))
 
     def forward(self, input: DifferentiableImage):
@@ -56,7 +57,7 @@ class PalletLoss(nn.Module):
             tensor = (
                 input.tensor.movedim(0, -1)
                 .contiguous()
-                .view(-1, self.n_pallets)
+                .view(-1, self.n_palettes)
                 .softmax(dim=-1)
             )
             N, n = tensor.shape
@@ -93,18 +94,18 @@ class PalletLoss(nn.Module):
 class HdrLoss(nn.Module):
     def __init__(
         self,
-        pallet_size: int,
-        n_pallets: int,
+        palette_size: int,
+        n_palettes: int,
         gamma: float = 2.5,
         weight: float = 0.15,
         device=None,
     ):
         """
-        Create a tensor of size (pallet_size, n_pallets) and set the first row to be the pallet_size
+        Create a tensor of size (palette_size, n_palettes) and set the first row to be the palette_size
         values raised to the power of gamma
 
-        :param pallet_size: The number of colors in the pallet
-        :param n_pallets: The number of pallets in the warehouse
+        :param palette_size: The number of colors in the palette
+        :param n_palettes: The number of palettes in the warehouse
         :param gamma: The gamma parameter for the power law
         :param weight: The weight of the loss
         :param device: The device to run the model on
@@ -115,10 +116,10 @@ class HdrLoss(nn.Module):
         self.device = device
         self.register_buffer(
             "comp",
-            torch.linspace(0, 1, pallet_size)
+            torch.linspace(0, 1, palette_size)
             .pow(gamma)
-            .view(pallet_size, 1)
-            .repeat(1, n_pallets)
+            .view(palette_size, 1)
+            .repeat(1, n_palettes)
             .to(device),
         )
         self.register_buffer("weight", torch.as_tensor(weight).to(device))
@@ -131,10 +132,10 @@ class HdrLoss(nn.Module):
         :return: The loss and the loss itself.
         """
         if isinstance(input, PixelImage):
-            pallet = input.sort_pallet()
-            magic_color = pallet.new_tensor([[[0.299, 0.587, 0.114]]])
+            palette = input.sort_palette()
+            magic_color = palette.new_tensor([[[0.299, 0.587, 0.114]]])
             color_norms = torch.linalg.vector_norm(
-                pallet * (magic_color.sqrt()), dim=-1
+                palette * (magic_color.sqrt()), dim=-1
             )
             loss_raw = F.mse_loss(color_norms, self.comp)
             return loss_raw * self.weight, loss_raw
@@ -175,8 +176,8 @@ class PixelImage(DifferentiableImage):
         width,
         height,
         scale,
-        pallet_size,
-        n_pallets,
+        palette_size,
+        n_palettes,
         gamma=1,
         hdr_weight=0.5,
         norm_weight=0.1,
@@ -186,38 +187,38 @@ class PixelImage(DifferentiableImage):
         if device is None:
             device = default_device()
         self.device = device
-        self.pallet_inertia = 2
-        pallet = (
-            torch.linspace(0, self.pallet_inertia, pallet_size)
+        self.palette_inertia = 2
+        palette = (
+            torch.linspace(0, self.palette_inertia, palette_size)
             .pow(gamma)
-            .view(pallet_size, 1, 1)
-            .repeat(1, n_pallets, 3)
+            .view(palette_size, 1, 1)
+            .repeat(1, n_palettes, 3)
         )
-        # pallet.set_(torch.rand_like(pallet)*self.pallet_inertia)
-        self.pallet = nn.Parameter(pallet.to(self.device))
+        # palette.set_(torch.rand_like(palette)*self.palette_inertia)
+        self.palette = nn.Parameter(palette.to(self.device))
 
-        self.pallet_size = pallet_size
-        self.n_pallets = n_pallets
+        self.palette_size = palette_size
+        self.n_palettes = n_palettes
         self.value = nn.Parameter(torch.zeros(height, width).to(self.device))
         self.tensor = nn.Parameter(
-            torch.zeros(n_pallets, height, width).to(self.device)
+            torch.zeros(n_palettes, height, width).to(self.device)
         )
         self.output_axes = ("n", "s", "y", "x")
         self.latent_strength = 0.1
         self.scale = scale
         self.hdr_loss = (
-            HdrLoss(pallet_size, n_pallets, gamma, hdr_weight)
+            HdrLoss(palette_size, n_palettes, gamma, hdr_weight)
             if hdr_weight != 0
             else None
         )
-        self.loss = PalletLoss(n_pallets, norm_weight)
-        self.register_buffer("pallet_target", torch.empty_like(self.pallet))
-        self.use_pallet_target = False
+        self.loss = PaletteLoss(n_palettes, norm_weight)
+        self.register_buffer("palette_target", torch.empty_like(self.palette))
+        self.use_palette_target = False
 
     def clone(self):
         """
         Returns a new PixelImage object with the same parameters as the original, and copies the
-        tensor and pallet values from the original
+        tensor and palette values from the original
         :return: A new PixelImage object with the same parameters as the
         original.
         """
@@ -226,48 +227,48 @@ class PixelImage(DifferentiableImage):
             width // self.scale,
             height // self.scale,
             self.scale,
-            self.pallet_size,
-            self.n_pallets,
+            self.palette_size,
+            self.n_palettes,
             hdr_weight=0 if self.hdr_loss is None else float(self.hdr_loss.weight),
             norm_weight=float(self.loss.weight),
         )
         with torch.no_grad():
             dummy.value.set_(self.value.clone())
             dummy.tensor.set_(self.tensor.clone())
-            dummy.pallet.set_(self.pallet.clone())
-            dummy.pallet_target.set_(self.pallet_target.clone())
-            dummy.use_pallet_target = self.use_pallet_target
+            dummy.palette.set_(self.palette.clone())
+            dummy.palette_target.set_(self.palette_target.clone())
+            dummy.use_palette_target = self.use_palette_target
         return dummy
 
-    def set_pallet_target(self, pil_image):
+    def set_palette_target(self, pil_image):
         """
-        If the user provides a pallet image, encode it and set it as the pallet target
+        If the user provides a palette image, encode it and set it as the palette target
 
         :param pil_image: A PIL image (this might be wrong... maybe a DifferentiableImage?)
         :return: The return value is a tuple of the form (output, loss).
         """
         if pil_image is None:
-            self.use_pallet_target = False
+            self.use_palette_target = False
             return
         dummy = self.clone()
-        dummy.use_pallet_target = False
+        dummy.use_palette_target = False
         dummy.encode_image(pil_image)
         with torch.no_grad():
-            self.pallet_target.set_(dummy.sort_pallet())
-            self.pallet.set_(self.pallet_target.clone())
-            self.use_pallet_target = True
+            self.palette_target.set_(dummy.sort_palette())
+            self.palette.set_(self.palette_target.clone())
+            self.use_palette_target = True
 
     @torch.no_grad()
-    def lock_pallet(self, lock=True):
+    def lock_palette(self, lock=True):
         """
-        If lock is True, set the pallet_target attribute to the value of the sort_pallet method
+        If lock is True, set the palette_target attribute to the value of the sort_palette method
 
-        :param lock: If True, the pallet_target is locked to the current pallet, defaults to True
+        :param lock: If True, the palette_target is locked to the current palette, defaults to True
         (optional)
         """
         if lock:
-            self.pallet_target.set_(self.sort_pallet().clone())
-        self.use_pallet_target = lock
+            self.palette_target.set_(self.sort_palette().clone())
+        self.use_palette_target = lock
 
     def image_loss(self):
         """
@@ -276,22 +277,22 @@ class PixelImage(DifferentiableImage):
         """
         return [x for x in [self.hdr_loss, self.loss] if x is not None]
 
-    def sort_pallet(self):
+    def sort_palette(self):
         """
-        Given a pallet of colors, sort the pallet such that the colors are sorted by their brightness
-        :return: The pallet is being returned.
+        Given a palette of colors, sort the palette such that the colors are sorted by their brightness
+        :return: The palette is being returned.
         """
-        if self.use_pallet_target:
-            return self.pallet_target
-        pallet = (self.pallet / self.pallet_inertia).clamp_(0, 1)
+        if self.use_palette_target:
+            return self.palette_target
+        palette = (self.palette / self.palette_inertia).clamp_(0, 1)
         # https://alienryderflex.com/hsp.html
-        magic_color = pallet.new_tensor([[[0.299, 0.587, 0.114]]])
-        color_norms = pallet.square().mul_(magic_color).sum(dim=-1)
-        pallet_indices = color_norms.argsort(dim=0).T
-        pallet = torch.stack(
-            [pallet[i][:, j] for j, i in enumerate(pallet_indices)], dim=1
+        magic_color = palette.new_tensor([[[0.299, 0.587, 0.114]]])
+        color_norms = palette.square().mul_(magic_color).sum(dim=-1)
+        palette_indices = color_norms.argsort(dim=0).T
+        palette = torch.stack(
+            [palette[i][:, j] for j, i in enumerate(palette_indices)], dim=1
         )
-        return pallet
+        return palette
 
     def get_image_tensor(self):
         return torch.cat([self.value.unsqueeze(0), self.tensor])
@@ -308,27 +309,27 @@ class PixelImage(DifferentiableImage):
 
     def decode_tensor(self):
         """
-        Given a tensor of shape (batch_size, n_pallets, n_values),
+        Given a tensor of shape (batch_size, n_palettes, n_values),
         returns a tensor of shape (batch_size, height, width, 3)
-        where each pixel is a color from the pallet
-        :return: The image with the pallet applied.
+        where each pixel is a color from the palette
+        :return: The image with the palette applied.
         """
         width, height = self.image_shape
-        pallet = self.sort_pallet()
+        palette = self.sort_palette()
 
         # brightnes values of pixels
-        values = self.value.clamp(0, 1) * (self.pallet_size - 1)
+        values = self.value.clamp(0, 1) * (self.palette_size - 1)
         value_floors, value_ceils, value_rounds, value_fracs = break_tensor(values)
         value_fracs = value_fracs.unsqueeze(-1).unsqueeze(-1)
 
-        pallet_weights = self.tensor.movedim(0, 2)
-        pallets = F.one_hot(pallet_weights.argmax(dim=2), num_classes=self.n_pallets)
+        palette_weights = self.tensor.movedim(0, 2)
+        palettes = F.one_hot(palette_weights.argmax(dim=2), num_classes=self.n_palettes)
 
-        pallet_weights = pallet_weights.softmax(dim=2).unsqueeze(-1)
-        pallets = pallets.unsqueeze(-1)
+        palette_weights = palette_weights.softmax(dim=2).unsqueeze(-1)
+        palettes = palettes.unsqueeze(-1)
 
-        colors_disc = pallet[value_rounds]
-        colors_disc = (colors_disc * pallets).sum(dim=2)
+        colors_disc = palette[value_rounds]
+        colors_disc = (colors_disc * palettes).sum(dim=2)
         colors_disc = F.interpolate(
             colors_disc.movedim(2, 0)
             .unsqueeze(0)
@@ -338,9 +339,9 @@ class PixelImage(DifferentiableImage):
         )
 
         colors_cont = (
-            pallet[value_floors] * (1 - value_fracs) + pallet[value_ceils] * value_fracs
+            palette[value_floors] * (1 - value_fracs) + palette[value_ceils] * value_fracs
         )
-        colors_cont = (colors_cont * pallet_weights).sum(dim=2)
+        colors_cont = (colors_cont * palette_weights).sum(dim=2)
         colors_cont = F.interpolate(
             colors_cont.movedim(2, 0)
             .unsqueeze(0)
@@ -360,40 +361,40 @@ class PixelImage(DifferentiableImage):
         return Image.fromarray(array).resize((width, height), Image.NEAREST)
 
     @torch.no_grad()
-    def render_pallet(self):
-        pallet = self.sort_pallet()
-        width, height = self.n_pallets * 16, self.pallet_size * 32
+    def render_palette(self):
+        palette = self.sort_palette()
+        width, height = self.n_palettes * 16, self.palette_size * 32
         array = np.array(
-            pallet.mul(255).clamp(0, 255).cpu().detach().numpy().astype(np.uint8)
+            palette.mul(255).clamp(0, 255).cpu().detach().numpy().astype(np.uint8)
         )[:, :, :]
         return Image.fromarray(array).resize((width, height), Image.NEAREST)
 
     @torch.no_grad()
-    def render_channel(self, pallet_i):
+    def render_channel(self, palette_i):
         """
-        Given a tensor of shape (batch_size, n_pallets, height, width),
-        returns a tensor of shape (batch_size, height, width, n_pallets)
+        Given a tensor of shape (batch_size, n_palettes, height, width),
+        returns a tensor of shape (batch_size, height, width, n_palettes)
 
-        :param pallet_i: The index of the channel to render
+        :param palette_i: The index of the channel to render
         :return: The image.
         """
         width, height = self.image_shape
-        pallet = self.sort_pallet()
-        pallet[:, :pallet_i, :] = 0.5
-        pallet[:, pallet_i + 1 :, :] = 0.5
+        palette = self.sort_palette()
+        palette[:, :palette_i, :] = 0.5
+        palette[:, palette_i + 1 :, :] = 0.5
 
-        values = self.value.clamp(0, 1) * (self.pallet_size - 1)
+        values = self.value.clamp(0, 1) * (self.palette_size - 1)
         value_floors, value_ceils, value_rounds, value_fracs = break_tensor(values)
         value_fracs = value_fracs.unsqueeze(-1).unsqueeze(-1)
 
-        pallet_weights = self.tensor.movedim(0, 2)
-        # pallets = F.one_hot(pallet_weights.argmax(dim=2), num_classes=self.n_pallets)
-        pallet_weights = pallet_weights.softmax(dim=2).unsqueeze(-1)
+        palette_weights = self.tensor.movedim(0, 2)
+        # palettes = F.one_hot(palette_weights.argmax(dim=2), num_classes=self.n_palettes)
+        palette_weights = palette_weights.softmax(dim=2).unsqueeze(-1)
 
         colors_cont = (
-            pallet[value_floors] * (1 - value_fracs) + pallet[value_ceils] * value_fracs
+            palette[value_floors] * (1 - value_fracs) + palette[value_ceils] * value_fracs
         )
-        colors_cont = (colors_cont * pallet_weights).sum(dim=2)
+        colors_cont = (colors_cont * palette_weights).sum(dim=2)
         colors_cont = F.interpolate(
             colors_cont.movedim(2, 0).unsqueeze(0), (height, width), mode="nearest"
         )
@@ -407,10 +408,10 @@ class PixelImage(DifferentiableImage):
     @torch.no_grad()
     def update(self):
         """
-        The pallet is clamped to the pallet inertia, the value is clamped to 1, and the tensor is
+        The palette is clamped to the palette inertia, the value is clamped to 1, and the tensor is
         clamped to infinity
         """
-        self.pallet.clamp_(0, self.pallet_inertia)
+        self.palette.clamp_(0, self.palette_inertia)
         self.value.clamp_(0, 1)
         self.tensor.clamp_(0, float("inf"))
         # self.tensor.set_(self.tensor.softmax(dim = 0))
@@ -420,7 +421,7 @@ class PixelImage(DifferentiableImage):
         Encodes the image into a tensor.
 
         :param pil_image: The image to encode
-        :param smart_encode: If True, the pallet will be optimized to match the image, defaults to True
+        :param smart_encode: If True, the palette will be optimized to match the image, defaults to True
         (optional)
         :param device: The device to run the model on
         """
@@ -434,7 +435,7 @@ class PixelImage(DifferentiableImage):
         # value_ref = ImageOps.grayscale(color_ref)
         with torch.no_grad():
             # https://alienryderflex.com/hsp.html
-            magic_color = self.pallet.new_tensor([[[0.299]], [[0.587]], [[0.114]]])
+            magic_color = self.palette.new_tensor([[[0.299]], [[0.587]], [[0.114]]])
             value_ref = torch.linalg.vector_norm(
                 color_ref * (magic_color.sqrt()), dim=0
             )
@@ -453,7 +454,7 @@ class PixelImage(DifferentiableImage):
             from pytti.ImageGuide import DirectImageGuide
 
             guide = DirectImageGuide(
-                self, None, optimizer=optim.Adam([self.pallet, self.tensor], lr=0.1)
+                self, None, optimizer=optim.Adam([self.palette, self.tensor], lr=0.1)
             )
             # why is there a magic number here?
             guide.run_steps(201, [], [], [mse])
@@ -461,14 +462,14 @@ class PixelImage(DifferentiableImage):
                 self.hdr_loss.set_weight(before_weight)
 
     @torch.no_grad()
-    def encode_random(self, random_pallet=False):
+    def encode_random(self, random_palette=False):
         """
-        Sets the value and pallet to random values (uniform noise).
+        Sets the value and palette to random values (uniform noise).
 
-        :param random_pallet: If True, the pallet is initialized to random values, defaults to False
+        :param random_palette: If True, the palette is initialized to random values, defaults to False
         (optional)
         """
         self.value.uniform_()
         self.tensor.uniform_()
-        if random_pallet:
-            self.pallet.uniform_(to=self.pallet_inertia)
+        if random_palette:
+            self.palette.uniform_(to=self.palette_inertia)

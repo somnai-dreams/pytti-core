@@ -1,18 +1,18 @@
-from pathlib import Path
 import os
-
-from loguru import logger
-
-from pytti import default_device, replace_grad, clamp_with_grad, vram_usage_mode
-from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
-import torch
-from torch.nn import functional as F
-from pytti.image_models import EMAImage
-from torchvision.transforms import functional as TF
-from PIL import Image
-from omegaconf import OmegaConf
 import urllib.request
+from pathlib import Path
+
+import torch
+from loguru import logger
+from omegaconf import OmegaConf
+from PIL import Image
+from torch.nn import functional as F
+from torchvision.transforms import functional as TF
 from tqdm import tqdm
+
+from pytti import clamp_with_grad, default_device, replace_grad, vram_usage_mode
+from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
+from pytti.image_models import EMAImage
 
 VQGAN_MODEL = None
 VQGAN_NAME = None

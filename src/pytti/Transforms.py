@@ -1,11 +1,11 @@
 import math
 
-import torch
-import torchvision.transforms.functional as TF
-import torch.nn.functional as F
-from PIL import Image
 import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from loguru import logger
+from PIL import Image
 
 from pytti import parametric_eval
 from pytti.LossAug.DepthLossClass import DepthLoss
@@ -346,50 +346,6 @@ def zoom_3d(
     return flow_out, img.decode_image()
 
 
-def animate_2d(
-    translate_y,
-    translate_x,
-    rotate_2d,
-    zoom_x_2d,
-    zoom_y_2d,
-    infill_mode,
-    sampling_mode,
-    img,
-    writer=None,
-    i=0,
-    t=-1,
-):
-    for v in (translate_y, translate_x, rotate_2d, zoom_x_2d, zoom_y_2d):
-        logger.debug(v)
-    tx, ty = parametric_eval(translate_x), parametric_eval(translate_y)
-    theta = parametric_eval(rotate_2d)
-    logger.debug(f"translating: {tx}, {ty}")
-    logger.debug(f"rotating: {theta}")
-    zx, zy = parametric_eval(zoom_x_2d), parametric_eval(zoom_y_2d)
-    logger.debug(f"zooming: {tx}, {ty}")
-    next_step_pil = zoom_2d(
-        img,
-        (tx, ty),
-        (zx, zy),
-        theta,
-        border_mode=infill_mode,
-        sampling_mode=sampling_mode,
-    )
-    ################
-    if writer is not None:
-        for k, v in {
-            "tx": tx,
-            "ty": ty,
-            "theta": theta,
-            "zx": zx,
-            "zy": zy,
-            "t": t,
-        }.items():
-            writer.add_scalar(tag=f"translation_2d/{k}", scalar_value=v, global_step=i)
-
-    return next_step_pil
-
-
 def animate_video_source(
     i,
     img,
@@ -474,9 +430,9 @@ def animate_video_source(
             # what is this magic number here?
             if reencode_each_frame or valid < 0.03:
                 if isinstance(img, PixelImage) and valid >= 0.03:
-                    img.lock_pallet()
+                    img.lock_palette()
                     img.encode_image(next_step_pil, smart_encode=False)
-                    img.lock_pallet(lock_palette)
+                    img.lock_palette(lock_palette)
                 else:
                     img.encode_image(next_step_pil)
                 # this variable is unused...

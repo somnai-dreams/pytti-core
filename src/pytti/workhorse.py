@@ -22,6 +22,7 @@ from pytti import (
     vram_profiling,
     vram_usage_mode,
 )
+from pytti.files import get_last_file, get_next_file
 from pytti.image_models import PixelImage, RGBImage, VQGANImage
 from pytti.ImageGuide import DirectImageGuide
 from pytti.LossAug.LossOrchestratorClass import (
@@ -29,7 +30,7 @@ from pytti.LossAug.LossOrchestratorClass import (
     configure_optical_flows,
     configure_stabilization_augs,
 )
-from pytti.Notebook import get_last_file, get_next_file, load_clip
+from pytti.Perceptor import load_clip
 from pytti.Perceptor.Embedder import HDMultiClipEmbedder
 from pytti.Perceptor.Prompt import parse_prompt
 from pytti.rotoscoper import ROTOSCOPERS, get_frames
@@ -233,20 +234,20 @@ def _hydra_main(cfg: DictConfig):
                 width=params.width,
                 height=params.height,
                 scale=params.pixel_size,
-                pallet_size=params.palette_size,
-                n_pallets=params.palettes,
+                palette_size=params.palette_size,
+                n_palettes=params.palettes,
                 gamma=params.gamma,
                 hdr_weight=params.hdr_weight,
                 norm_weight=params.palette_normalization_weight,
                 device=device,
             )
-            img.encode_random(random_pallet=params.random_initial_palette)
+            img.encode_random(random_palette=params.random_initial_palette)
             if params.target_palette.strip() != "":
-                img.set_pallet_target(
+                img.set_palette_target(
                     Image.open(fetch(params.target_palette)).convert("RGB")
                 )
             else:
-                img.lock_pallet(params.lock_palette)
+                img.lock_palette(params.lock_palette)
         elif params.image_model == "Unlimited Palette":
             img = RGBImage(
                 params.width, params.height, params.pixel_size, device=device

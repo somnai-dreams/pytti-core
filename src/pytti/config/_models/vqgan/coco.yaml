@@ -1,6 +1,0 @@
-config:
-  filename: coco.yaml
-  url: https://dl.nmkd.de/ai/clip/coco/coco.yaml
-weights:
-  filename: coco.ckpt
-  url: https://dl.nmkd.de/ai/clip/coco/coco.ckpt

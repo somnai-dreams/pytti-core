@@ -1,6 +1,7 @@
-import imageio, subprocess
+import subprocess
 from os.path import exists as path_exists
 
+import imageio
 from loguru import logger
 from PIL import Image
 
@@ -20,10 +21,8 @@ class RotoscopingOrchestrator:
             r.update(frame_n)
 
 
-ROTOSCOPERS = RotoscopingOrchestrator()  # fml...
-rotoscopers = ROTOSCOPERS.rotoscopers
+ROTOSCOPERS = RotoscopingOrchestrator()
 update_rotoscopers = ROTOSCOPERS.update_rotoscopers
-clear_rotoscopers = ROTOSCOPERS.clear_rotoscopers
 
 # surprised we're not using opencv here.
 # let's call this another unnecessary subprocess call to deprecate.

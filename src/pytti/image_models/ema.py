@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+
 from pytti.image_models.differentiable_image import DifferentiableImage
 
 

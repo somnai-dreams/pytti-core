@@ -1,8 +1,9 @@
+import io
 import math
 import re
-import requests
-import io
+
 import numpy as np
+import requests
 
 math_env = None
 global_t = 0
@@ -38,7 +39,7 @@ def parametric_eval(string, **vals):
                 math_env[f"{band}_prev"] = global_bands_prev[band]
         try:
             output = eval(string, math_env)
-        except SyntaxError as e:
+        except SyntaxError:
             raise RuntimeError("Error in parametric value " + string)
         eval_memo[string] = output
         return output

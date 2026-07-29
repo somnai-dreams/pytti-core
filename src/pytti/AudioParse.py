@@ -1,8 +1,8 @@
-import numpy as np
-import typing
 import subprocess
+
+import numpy as np
 from loguru import logger
-from scipy.signal import butter, sosfilt, sosfreqz
+from scipy.signal import butter, sosfilt
 
 SAMPLERATE = 44100
 
@@ -68,7 +68,7 @@ class SpectralAudioParser:
         self.band_maxima = maxima
         logger.debug(f"initialized band maxima for {len(filters)} filters: {self.band_maxima}")
 
-    def get_params(self, t) -> typing.Dict[str, float]:
+    def get_params(self, t) -> dict[str, float]:
         """
         Return the amplitude parameters at the given point in time t within the audio track, or 0 if the track has ended.
         Amplitude/energy parameters are normalized into the [0,1] range.
@@ -85,7 +85,7 @@ class SpectralAudioParser:
                 return {}
             return bp_filtered_norm(window_samples, self.filters, self.band_maxima)
         else:
-            logger.debug(f"Warning: Audio input has ended. Returning null result")
+            logger.debug("Warning: Audio input has ended. Returning null result")
             return {}
 
     def get_duration(self):
@@ -106,7 +106,7 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
     return y
 
 
-def bp_filtered(window_samples, filters) -> typing.Dict[str, float]:
+def bp_filtered(window_samples, filters) -> dict[str, float]:
     results = {}
     for filter in filters:
         offset = filter.f_width / 2
@@ -117,7 +117,7 @@ def bp_filtered(window_samples, filters) -> typing.Dict[str, float]:
     return results
 
 
-def bp_filtered_norm(window_samples, filters, norm_factors) -> typing.Dict[str, float]:
+def bp_filtered_norm(window_samples, filters, norm_factors) -> dict[str, float]:
     results = bp_filtered(window_samples, filters)
     for key in results:
         # normalize
