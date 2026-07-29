@@ -26,6 +26,38 @@ SUPPORTED_CLIP_MODELS = {
 CLIP_MODEL_NAMES = None
 
 
+class _ContiguousGrad(torch.autograd.Function):
+    """Identity forward; forces the incoming gradient contiguous in backward."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad.contiguous()
+
+
+def _install_grad_fences(model):
+    """
+    MPS pathology fence: CLIP's class-token cat produces a narrowed
+    (non-contiguous) gradient which, flowing back into conv2d's
+    input-gradient kernel, is ~100x slower on MPS (measured 43s -> 0.4s for
+    a 24x224px forward+backward on ViT-B/32). A one-node identity that makes
+    the gradient contiguous at the conv/attention-pool boundary fixes it.
+    Harmless on CUDA/CPU (one no-op autograd node).
+    """
+    fence = lambda module, inputs, output: _ContiguousGrad.apply(output)  # noqa: E731
+    visual = model.visual
+    if hasattr(visual, "conv1") and hasattr(visual, "transformer"):
+        # ViT: fence between the patchify conv and the token pipeline
+        visual.conv1.register_forward_hook(fence)
+    elif hasattr(visual, "attnpool"):
+        # ModifiedResNet: fence between the convnet and the attention pool
+        visual.layer4.register_forward_hook(fence)
+    return model
+
+
 # this should probably be a method on the multiperceptor guide
 @vram_usage_mode("CLIP")
 def init_clip(clip_models, device=None):
@@ -34,10 +66,12 @@ def init_clip(clip_models, device=None):
     global CLIP_PERCEPTORS
     if CLIP_PERCEPTORS is None:
         CLIP_PERCEPTORS = [
-            clip.load(model, jit=False)[0]
-            .eval()
-            .requires_grad_(False)
-            .to(device, memory_format=memory_format_for(device))
+            _install_grad_fences(
+                clip.load(model, jit=False)[0]
+                .eval()
+                .requires_grad_(False)
+                .to(device, memory_format=memory_format_for(device))
+            )
             for model in clip_models
         ]
 
