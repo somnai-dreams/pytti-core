@@ -6,10 +6,9 @@ from PIL import Image
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
-from pytti import default_device, fetch, parse, vram_usage_mode
+from pytti import default_device, fetch, vram_usage_mode
 from pytti.LossAug.BaseLossClass import Loss
-
-# from pytti.Notebook import Rotoscoper
+from pytti.prompt_spec import MaskAll, MaskImage, MaskSpec, MaskVideo
 from pytti.rotoscoper import Rotoscoper
 
 
@@ -36,33 +35,49 @@ class MSELoss(Loss):
     @classmethod
     @vram_usage_mode("Loss Augs")
     @torch.no_grad()
-    def TargetImage(
-        cls, prompt_string, image_shape, pil_image=None, is_path=False, device=None
+    def build(
+        cls,
+        name,
+        image_shape,
+        *,
+        weight="1",
+        stop="-inf",
+        mask: MaskSpec | None = None,
+        pil_image=None,
+        path="",
+        device=None,
     ):
-        # Why is this prompt parsing stuff here? Deprecate in favor of centralized
-        # parsing functions (if feasible)
-        text, weight, stop = parse(
-            prompt_string, r"(?<!^http)(?<!s):|:(?!/)", ["", "1", "-inf"]
-        )
-        weight, mask = parse(weight, r"_", ["1", ""])
-        text = text.strip()
-        mask = mask.strip()
+        """
+        Construct a direct loss from typed fields — no string parsing.
+        `mask` is a prompt_spec.MaskSpec (image/video masks only).
+        """
         if device is None:
             device = default_device()
-        if pil_image is None and text != "" and is_path:
-            pil_image = Image.open(fetch(text)).convert("RGB")
+        if pil_image is None and path:
+            pil_image = Image.open(fetch(path)).convert("RGB")
+        if pil_image is not None:
             im = pil_image.resize(image_shape, Image.LANCZOS)
-            comp = cls.make_comp(im)
-        elif pil_image is None:
-            comp = torch.zeros(1, 1, 1, 1, device=device)
+            comp = cls.make_comp(im, device=device)
         else:
-            im = pil_image.resize(image_shape, Image.LANCZOS)
-            comp = cls.make_comp(im)
-        if image_shape is None:
-            image_shape = pil_image.size
-        out = cls(comp, weight, stop, text + " (direct)", image_shape, device=device)
-        out.set_mask(mask)
+            comp = torch.zeros(1, 1, 1, 1, device=device)
+        out = cls(comp, weight, stop, name + " (direct)", image_shape, device=device)
+        out.apply_mask_spec(mask)
         return out
+
+    def apply_mask_spec(self, mask: "MaskSpec | None"):
+        if mask is None or isinstance(mask, MaskAll):
+            return
+        if isinstance(mask, MaskImage):
+            pil = Image.open(fetch(mask.path)).convert("L")
+            self.set_mask(pil, inverted=mask.inverted)
+        elif isinstance(mask, MaskVideo):
+            Rotoscoper(mask.path, self, inverted=mask.inverted).update(0)
+        else:
+            raise ValueError(
+                f"Direct losses only support image/video masks, got {mask!r} "
+                f"for {self.name!r} — geometric and semantic masks apply to "
+                "semantic (CLIP) prompts."
+            )
 
     @torch.no_grad()
     def set_mask(self, mask, inverted=False, device=None):

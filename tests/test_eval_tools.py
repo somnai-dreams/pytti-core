@@ -1,7 +1,7 @@
 import pytest
 
 from pytti import eval_tools
-from pytti.eval_tools import is_zero_weight, parametric_eval, parse, set_bands, set_t
+from pytti.eval_tools import is_zero_weight, parametric_eval, set_bands, set_t
 
 
 @pytest.fixture(autouse=True)
@@ -120,9 +120,3 @@ def test_dangerous_expressions_rejected(expr):
 )
 def test_is_zero_weight(weight, expected):
     assert is_zero_weight(weight) is expected
-
-
-def test_parse_backfills_defaults():
-    assert parse("forest", r":", ["", "1", "-inf"]) == ["forest", "1", "-inf"]
-    assert parse("forest:2", r":", ["", "1", "-inf"]) == ["forest", "2", "-inf"]
-    assert parse("forest:2:0.5", r":", ["", "1", "-inf"]) == ["forest", "2", "0.5"]

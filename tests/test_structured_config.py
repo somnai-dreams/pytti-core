@@ -1,7 +1,6 @@
-from hydra import initialize, compose
-from omegaconf import OmegaConf
 import pytest
-from pytti.config import structured_config
+from hydra import compose, initialize
+from omegaconf import OmegaConf
 
 
 def test_initialization_of_default_structured_config():

@@ -1,6 +1,5 @@
 import math
 from collections.abc import Callable
-from pathlib import Path
 
 import torch
 from clip import clip
@@ -18,12 +17,20 @@ from pytti import (
     format_input,
     is_zero_weight,
     parametric_eval,
-    parse,
     replace_grad,
     vram_usage_mode,
 )
 from pytti.device import default_device
 from pytti.image_models import RGBImage
+from pytti.prompt_spec import (
+    MaskAll,
+    MaskGeometric,
+    MaskImage,
+    MaskSemantic,
+    MaskSpec,
+    MaskVideo,
+    parse_prompt_spec,
+)
 
 # from pytti.Notebook import Rotoscoper
 from pytti.rotoscoper import Rotoscoper
@@ -35,18 +42,23 @@ def spherical_dist_loss(x, y):
     return x.sub(y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
 
 
-def make_mask(mask, thresh):
-    if mask.startswith("[") and mask.endswith("]"):
-        inner = mask[1:-1]
-        if Path(inner).suffix.lower() == ".mp4":
-            return Rotoscoper(inner)
-        mask_fun = mask_image(inner)
-    elif mask in MASK_DICT:
-        mask_fun = MASK_DICT[mask]
+def make_mask(spec: MaskSpec, thresh):
+    """
+    Turn a typed MaskSpec into a mask callable (or a Rotoscoper for video
+    masks, which the caller attaches to the prompt).
+    """
+    if isinstance(spec, MaskVideo):
+        return Rotoscoper(spec.path, inverted=spec.inverted)
+    if isinstance(spec, MaskAll):
+        mask_fun = mask_all
+    elif isinstance(spec, MaskGeometric):
+        mask_fun = MASK_DICT[spec.key]
+    elif isinstance(spec, MaskImage):
+        mask_fun = mask_image(spec.path, inverted=spec.inverted)
+    elif isinstance(spec, MaskSemantic):
+        mask_fun = mask_semantic(spec.text)
     else:
-        # semantic masks need a CLIP text encode — only build one when the
-        # mask really is free text, not a geometric key
-        mask_fun = mask_semantic(mask)
+        raise TypeError(f"Unknown mask spec: {spec!r}")
     return lambda pos, size, emb: mask_fun(pos, size, emb, parametric_eval(thresh))
 
 
@@ -200,36 +212,37 @@ def parse_prompt(embedder, prompt_string="", pil_image=None, device=None):
     """
     if device is None:
         device = default_device()
-    text, weight, stop = parse(prompt_string, r":(?![^\[]*\])", ["", "1", "-inf"])
-    weight, mask, cutoff = parse(
-        weight, r"_(?![^\[]*\])", ["1", "a", "0.5000873264"]
-    )  # can you guess what this does?
-    text = text.strip()
-    if not text:
-        raise ValueError(
-            f"Prompt {prompt_string!r} has no text — check for stray '|' or ':' "
-            "separators in your scenes."
-        )
-    mask = make_mask(mask.strip(), cutoff)
+    spec = parse_prompt_spec(prompt_string)
+    mask = make_mask(spec.mask, spec.cutoff)
     if isinstance(mask, Rotoscoper):
         roto = mask
         mask = mask_all
     else:
         roto = None
-    if text.startswith("[") and text.endswith("]"):
-        pil_image = Image.open(fetch(text[1:-1].strip())).convert("RGB")
+    image_path = spec.image_path()
+    if image_path is not None:
+        pil_image = Image.open(fetch(image_path)).convert("RGB")
     if pil_image is not None:
         dummy = RGBImage(*pil_image.size)
         dummy.encode_image(pil_image)
         out = LocationAwareMCIP(
-            *embedder(dummy), embedder, weight, stop, text, prompt_string, mask=mask
+            *embedder(dummy),
+            embedder,
+            spec.weight,
+            spec.stop,
+            spec.text,
+            prompt_string,
+            mask=mask,
         )
     else:
         perceptors = pytti.Perceptor.CLIP_PERCEPTORS
         embeds = cat_with_pad(
-            [p.encode_text(clip.tokenize(text).to(device)).float() for p in perceptors]
+            [
+                p.encode_text(clip.tokenize(spec.text).to(device)).float()
+                for p in perceptors
+            ]
         )
-        out = Prompt(embeds, weight, stop, text, prompt_string, mask=mask)
+        out = Prompt(embeds, spec.weight, spec.stop, spec.text, prompt_string, mask=mask)
     if roto is not None:
         roto.target = out
         roto.update(0)

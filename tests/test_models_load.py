@@ -1,13 +1,11 @@
 from pathlib import Path
+
 import pytest
 from loguru import logger
 
 from pytti.image_models.vqgan import (
-    VQGANImage,
     VQGAN_MODEL_NAMES,
-    VQGAN_CONFIG_URLS,
-    VQGAN_CHECKPOINT_URLS,
-    load_vqgan_model,
+    VQGANImage,
 )
 
 # vqgan
@@ -28,9 +26,7 @@ def test_load_vqgan_no_download(model_name):
 """
 
 # cannibalized from e2e tests
-from hydra import initialize, initialize_config_module, initialize_config_dir, compose
-from omegaconf import OmegaConf
-import pytest
+from hydra import compose, initialize
 
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
@@ -41,7 +37,7 @@ class Test_VQGANImage:
         with initialize(config_path=CONFIG_BASE_PATH):
             cfg = compose(
                 config_name=CONFIG_DEFAULTS,
-                overrides=[f"conf=_test_vqgan.yaml"],
+                overrides=["conf=_test_vqgan.yaml"],
             )
             return cfg
 
@@ -65,7 +61,7 @@ class Test_VQGANImage:
 
 # clip
 
-from pytti.Perceptor import load_clip, _sanitize_for_config
+from pytti.Perceptor import _sanitize_for_config, load_clip
 
 
 def test_load_clip_w_at_symbol_in_identifier():

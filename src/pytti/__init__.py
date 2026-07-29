@@ -9,7 +9,6 @@ from pytti.eval_tools import (
     fetch,
     is_zero_weight,
     parametric_eval,
-    parse,
     set_bands,
     set_t,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "clamp_grad",
     "normalize",
     "fetch",
-    "parse",
     "parametric_eval",
     "set_t",
     "vram_usage_mode",

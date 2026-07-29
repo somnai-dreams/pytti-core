@@ -4,7 +4,7 @@ import torch
 from PIL import Image
 from torchvision.transforms import functional as TF
 
-from pytti import default_device, fetch, parse, vram_usage_mode
+from pytti import default_device, fetch, vram_usage_mode
 from pytti.LossAug.MSELossClass import MSELoss
 
 
@@ -35,28 +35,33 @@ class LatentLoss(MSELoss):
     @classmethod
     @vram_usage_mode("Latent Image Loss")
     @torch.no_grad()
-    def TargetImage(
-        cls, prompt_string, image_shape, pil_image=None, is_path=False, device=None
+    def build(
+        cls,
+        name,
+        image_shape,
+        *,
+        weight="1",
+        stop="-inf",
+        mask=None,
+        pil_image=None,
+        path="",
+        device=None,
     ):
         if device is None:
             device = default_device()
-        text, weight, stop = parse(
-            prompt_string, r"(?<!^http)(?<!s):|:(?!/)", ["", "1", "-inf"]
-        )
-        weight, mask = parse(weight, r"_", ["1", ""])
-        text = text.strip()
-        mask = mask.strip()
-        if pil_image is None and text != "" and is_path:
-            pil_image = Image.open(fetch(text)).convert("RGB")
+        if pil_image is None and path:
+            pil_image = Image.open(fetch(path)).convert("RGB")
+        # placeholder comp; the actual latent target is computed lazily in
+        # get_loss once the image model exists (needs img.make_latent)
         comp = (
-            MSELoss.make_comp(pil_image)
+            MSELoss.make_comp(pil_image, device=device)
             if pil_image is not None
             else torch.zeros(1, 1, 1, 1, device=device)
         )
-        out = cls(comp, weight, stop, text + " (latent)", image_shape)
+        out = cls(comp, weight, stop, name + " (latent)", image_shape)
         if pil_image is not None:
             out.set_comp(pil_image)
-        out.set_mask(mask)
+        out.apply_mask_spec(mask)
         return out
 
     def set_mask(self, mask, inverted=False):

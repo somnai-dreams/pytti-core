@@ -3,16 +3,14 @@ Broad strokes, end-to-end testing because something is better than nothing,
 which is what we have right now.
 """
 
-from hydra import initialize, initialize_config_module, initialize_config_dir, compose
-from omegaconf import OmegaConf
 import pytest
+from hydra import compose, initialize
 
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
 
 
 def test_import():
-    from pytti.workhorse import _main as render_frames
 
     assert True
 

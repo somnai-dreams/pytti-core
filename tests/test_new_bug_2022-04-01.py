@@ -1,10 +1,9 @@
-import pytest
-import os
-from hydra import initialize, compose
-from loguru import logger
-from pytti.workhorse import _main as render_frames
-
 from pathlib import Path
+
+import pytest
+from hydra import compose, initialize
+
+from pytti.workhorse import _main as render_frames
 
 
 def test_the_thing():

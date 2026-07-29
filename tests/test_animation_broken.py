@@ -3,9 +3,11 @@ Trying to construct test case to reproduce
   https://github.com/pytti-tools/pytti-core/issues/82
 """
 
-from omegaconf import OmegaConf
-from pytti.workhorse import _main as render_frames
 from pathlib import Path
+
+from omegaconf import OmegaConf
+
+from pytti.workhorse import _main as render_frames
 
 # video_fpath = str(next(Path(".").glob("**/assets/*.mp4")))
 video_fpath = str(next(Path(".").glob("**/src/pytti/assets/HebyMorgongava_512kb.mp4")))

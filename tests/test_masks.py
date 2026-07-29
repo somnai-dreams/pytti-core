@@ -10,6 +10,7 @@ from pytti.Perceptor.Prompt import (
     mask_right,
     mask_up,
 )
+from pytti.prompt_spec import MaskGeometric
 
 # a cutout at x∈[0.1, 0.5], y∈[0.6, 0.8]: pos=(0.1, 0.6), size=(0.4, 0.2)
 POS = torch.tensor([[0.1, 0.6]])
@@ -37,7 +38,7 @@ def test_make_mask_passes_pos_and_size_in_order():
     # geometric mask computed the wrong quantity. With pos.x-center=0.3 and
     # a swap the center would be size.x + pos.x/2 = 0.45 — thresh 0.4
     # distinguishes the two.
-    masked = make_mask("r", "0.4")
+    masked = make_mask(MaskGeometric(key="r"), "0.4")
     expected_weight = mask_right(POS, SIZE, EMB, thresh=0.4)
     stops, weights = masked(POS, SIZE, EMB)
     assert weights == expected_weight[1] or torch.equal(
@@ -49,13 +50,13 @@ def test_make_mask_passes_pos_and_size_in_order():
 
 def test_make_mask_near_uses_size():
     # with the historical swap, "n" tested position instead of size
-    masked = make_mask("n", "0.3")
+    masked = make_mask(MaskGeometric(key="n"), "0.3")
     stops, _ = masked(POS, SIZE, EMB)
     assert stops.item() == 1.0  # min size 0.2 < 0.3
 
 
 def test_make_mask_threshold_is_parametric():
-    masked = make_mask("r", "0.2 + 0.2")
+    masked = make_mask(MaskGeometric(key="r"), "0.2 + 0.2")
     stops, _ = masked(POS, SIZE, EMB)
     assert stops.item() == 1.0
 

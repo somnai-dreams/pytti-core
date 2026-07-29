@@ -8,7 +8,6 @@ from loguru import logger
 from PIL import Image
 
 from pytti import parametric_eval
-from pytti.LossAug.DepthLossClass import DepthLoss
 
 PADDING_MODES = {
     "mirror": "reflection",
@@ -277,6 +276,10 @@ def zoom_3d(
 
     pil_image = img.decode_image()
     f = width / height
+
+    # Deferred import: breaks the Transforms -> LossAug -> OpticalFlow ->
+    # Transforms cycle, and depth estimation is a 3D-only dependency anyway.
+    from pytti.LossAug.DepthLossClass import DepthLoss
 
     # convert depth map: AdaBins metric range (~1e-3..10m) rescaled into the
     # configured near/far pixel range

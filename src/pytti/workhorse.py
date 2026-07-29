@@ -16,6 +16,7 @@ from PIL import Image
 from pytti import (
     empty_cache,
     fetch,
+    is_zero_weight,
     print_vram_usage,
     reset_vram_usage,
     set_default_device,
@@ -33,6 +34,7 @@ from pytti.LossAug.LossOrchestratorClass import (
 from pytti.Perceptor import load_clip
 from pytti.Perceptor.Embedder import HDMultiClipEmbedder
 from pytti.Perceptor.Prompt import parse_prompt
+from pytti.prompt_spec import parse_prompt_spec
 from pytti.rotoscoper import ROTOSCOPERS, get_frames
 from pytti.update_func import update
 from pytti.warmup import ensure_configs_exist, register_resolvers
@@ -294,13 +296,22 @@ def _hydra_main(cfg: DictConfig):
         )
 
         # other image prompts
-        loss_augs.extend(
-            type(img)
-            .get_preferred_loss()
-            .TargetImage(p.strip(), img.image_shape, is_path=True)
-            for p in params.direct_image_prompts.split("|")
-            if p.strip()
-        )
+        for entry in params.direct_image_prompts.split("|"):
+            if not entry.strip():
+                continue
+            spec = parse_prompt_spec(entry.strip())
+            loss_augs.append(
+                type(img)
+                .get_preferred_loss()
+                .build(
+                    spec.text,
+                    img.image_shape,
+                    weight=spec.weight,
+                    stop=spec.stop,
+                    mask=spec.mask,
+                    path=spec.image_path() or spec.text,
+                )
+            )
 
         # stabilization
         (
@@ -310,7 +321,7 @@ def _hydra_main(cfg: DictConfig):
             stabilization_augs,
         ) = configure_stabilization_augs(img, init_image_pil, params, loss_augs)
 
-        if params.semantic_stabilization_weight not in ["0", ""]:
+        if not is_zero_weight(params.semantic_stabilization_weight):
             last_frame_semantic = parse_prompt(
                 embedder,
                 f"stabilization:{params.semantic_stabilization_weight}",

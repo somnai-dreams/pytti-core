@@ -443,7 +443,7 @@ class PixelImage(DifferentiableImage):
 
         # no embedder needed without any prompts
         if smart_encode:
-            mse = HSVLoss.TargetImage("HSV loss", self.image_shape, pil_image)
+            mse = HSVLoss.build("HSV loss", self.image_shape, pil_image=pil_image)
 
             if self.hdr_loss is not None:
                 before_weight = self.hdr_loss.weight.detach()

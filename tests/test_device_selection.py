@@ -1,10 +1,9 @@
 import pytest
-
-from hydra import initialize, compose
-from loguru import logger
-from pytti.workhorse import _main as render_frames
-from omegaconf import OmegaConf, open_dict
 import torch
+from hydra import compose, initialize
+from omegaconf import OmegaConf, open_dict
+
+from pytti.workhorse import _main as render_frames
 
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
@@ -16,7 +15,7 @@ def run_cfg(cfg_str):
     with initialize(config_path=CONFIG_BASE_PATH):
         cfg_base = compose(
             config_name=CONFIG_DEFAULTS,
-            overrides=[f"conf=_empty"],
+            overrides=["conf=_empty"],
         )
         cfg_this = OmegaConf.create(cfg_str)
 
