@@ -146,5 +146,12 @@ dmypy.json
 .pyre/
 
 #way too big to check into github
-*/*.ckbt
-*.ckbt
+*.ckpt
+*.bak
+
+# generated into CWD by the CLI at startup
+/config/
+
+# local env
+.venv/
+uv.lock
