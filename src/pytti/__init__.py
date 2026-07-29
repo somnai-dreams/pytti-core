@@ -47,6 +47,8 @@ __all__ = [
     "clamp_grad",
     "normalize",
     "fetch",
+    "is_zero_weight",
+    "set_bands",
     "parametric_eval",
     "set_t",
     "vram_usage_mode",

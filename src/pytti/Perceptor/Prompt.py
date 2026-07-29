@@ -401,7 +401,7 @@ class LocationAwareMCIP(MultiClipImagePrompt):
         cent_a = self.positions + self.sizes / 2
         cent_b = position + size / 2
         indices = minimize_average_distance(cent_a, cent_b)
-        embed = torch.stack([a[i] for a, i in zip(embed, indices)])
-        position = torch.stack([a[i] for a, i in zip(position, indices)])
-        size = torch.stack([a[i] for a, i in zip(size, indices)])
+        embed = torch.stack([a[i] for a, i in zip(embed, indices, strict=True)])
+        position = torch.stack([a[i] for a, i in zip(position, indices, strict=True)])
+        size = torch.stack([a[i] for a, i in zip(size, indices, strict=True)])
         return super().forward(embed, position, size, offset=0.7)

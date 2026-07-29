@@ -2,6 +2,7 @@ import torch
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
+from pytti.device import memory_format_for
 from pytti.LossAug.MSELossClass import MSELoss
 
 

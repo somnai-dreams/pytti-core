@@ -21,7 +21,6 @@ caller re-parses strings.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Union
 
 from attrs import define
 
@@ -58,7 +57,7 @@ class MaskSemantic:
     text: str
 
 
-MaskSpec = Union[MaskAll, MaskGeometric, MaskImage, MaskVideo, MaskSemantic]
+MaskSpec = MaskAll | MaskGeometric | MaskImage | MaskVideo | MaskSemantic
 
 
 @define

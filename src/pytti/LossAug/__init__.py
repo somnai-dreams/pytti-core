@@ -15,3 +15,8 @@ from pytti.LossAug.TVLossClass import TVLoss
 
 # yeesh the ordering fragility in here...
 # TO DO: let's make this a class attribute on something
+
+__all__ = [
+    "Loss", "TVLoss", "MSELoss", "OpticalFlowLoss", "TargetFlowLoss",
+    "DepthLoss", "EdgeLoss", "LatentLoss", "HSVLoss",
+]

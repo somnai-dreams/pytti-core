@@ -46,10 +46,10 @@ def format_input(tensor, source, dest) -> torch.Tensor:
 
 
 def pad_tensor(tensor, target_len) -> torch.Tensor:
-    l = tensor.shape[-1]
-    if l >= target_len:
+    length = tensor.shape[-1]
+    if length >= target_len:
         return tensor
-    return F.pad(tensor, (0, target_len - l))
+    return F.pad(tensor, (0, target_len - length))
 
 
 def cat_with_pad(tensors):

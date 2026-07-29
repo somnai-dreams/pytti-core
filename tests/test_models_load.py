@@ -6,8 +6,6 @@ from loguru import logger
 from pytti.config.model_names import VQGAN_MODEL_NAMES
 from pytti.image_models.vqgan import VQGANImage
 
-pytestmark = pytest.mark.download
-
 # vqgan
 
 """
@@ -62,6 +60,8 @@ class Test_VQGANImage:
 # clip
 
 from pytti.Perceptor import _sanitize_for_config, load_clip
+
+pytestmark = pytest.mark.download
 
 
 def test_load_clip_w_at_symbol_in_identifier():

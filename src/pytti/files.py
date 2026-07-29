@@ -66,7 +66,7 @@ def get_next_file(directory, pattern, templates):
     return (
         re.sub(
             pattern,
-            lambda m: f"{m.group('pre')}{i + 1}{m.group('post')}",
+            lambda m, i=i: f"{m.group('pre')}{i + 1}{m.group('post')}",
             templates[min(i, n)],
         ),
         i + 1,
