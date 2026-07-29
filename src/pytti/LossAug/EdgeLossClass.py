@@ -17,13 +17,13 @@ class EdgeLoss(MSELoss):
         tensor = TF.rgb_to_grayscale(tensor)
         dx_ker = (
             torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]])
-            .to(device=device, memory_format=torch.channels_last)
+            .to(device=device, memory_format=memory_format_for(device))
             .float()
             .div(8)
         )
         dy_ker = (
             torch.tensor([[[[1, 2, 1], [0, 0, 0], [-1, -2, -1]]]])
-            .to(device=device, memory_format=torch.channels_last)
+            .to(device=device, memory_format=memory_format_for(device))
             .float()
             .div(8)
         )

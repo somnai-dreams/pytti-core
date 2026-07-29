@@ -63,6 +63,17 @@ def default_device() -> torch.device:
     return _default
 
 
+def memory_format_for(device) -> torch.memory_format:
+    """
+    channels_last speeds up CUDA tensor cores, but MPS autograd breaks on
+    channels_last tensors in the ResNet-CLIP backward (view-vs-stride
+    RuntimeError), so use it on CUDA only.
+    """
+    if torch.device(device).type == "cuda":
+        return torch.channels_last
+    return torch.contiguous_format
+
+
 def empty_cache() -> None:
     """Release cached allocator memory on whatever backend is active."""
     if torch.cuda.is_available():

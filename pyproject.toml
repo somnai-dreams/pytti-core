@@ -32,11 +32,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # 3D animation (AdaBins monocular depth)
-threed = ["pyttitools-adabins @ git+https://github.com/pytti-tools/AdaBins.git"]
+threed = [
+    "pyttitools-adabins @ git+https://github.com/pytti-tools/AdaBins.git",
+    "gdown",  # adabins imports it but does not declare it
+]
 # Video Source animation + flow stabilization (GMA optical flow)
 video = ["pyttitools-gma @ git+https://github.com/pytti-tools/GMA.git"]
 animation = [
     "pyttitools-adabins @ git+https://github.com/pytti-tools/AdaBins.git",
+    "gdown",  # adabins imports it but does not declare it
     "pyttitools-gma @ git+https://github.com/pytti-tools/GMA.git",
 ]
 

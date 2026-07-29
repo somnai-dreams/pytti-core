@@ -3,7 +3,7 @@ from clip import clip
 from loguru import logger
 
 from pytti import vram_usage_mode
-from pytti.device import default_device
+from pytti.device import default_device, memory_format_for
 
 CLIP_PERCEPTORS = None
 
@@ -37,7 +37,7 @@ def init_clip(clip_models, device=None):
             clip.load(model, jit=False)[0]
             .eval()
             .requires_grad_(False)
-            .to(device, memory_format=torch.channels_last)
+            .to(device, memory_format=memory_format_for(device))
             for model in clip_models
         ]
 

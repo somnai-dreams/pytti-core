@@ -1,5 +1,7 @@
 import gc
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -10,6 +12,7 @@ from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
 from pytti import default_device, fetch, vram_usage_mode
+from pytti.device import memory_format_for
 from pytti.LossAug.MSELossClass import MSELoss
 from pytti.rotoscoper import Rotoscoper
 from pytti.Transforms import apply_flow
@@ -107,7 +110,7 @@ class TargetFlowLoss(MSELoss):
         if device is None:
             device = getattr(self, "device", self.device)
         self.comp.set_(
-            flow.movedim(-1, 1).to(device, memory_format=torch.channels_last)
+            flow.movedim(-1, 1).to(device, memory_format=memory_format_for(device))
         )
         self.mag = float(torch.linalg.norm(self.comp, dim=1).square().mean())
 
@@ -124,7 +127,7 @@ class TargetFlowLoss(MSELoss):
         last_step = (
             TF.to_tensor(last_step_pil)
             .unsqueeze(0)
-            .to(device, memory_format=torch.channels_last)
+            .to(device, memory_format=memory_format_for(device))
         )
         self.last_step.set_(last_step)
 
@@ -150,7 +153,7 @@ class TargetFlowLoss(MSELoss):
         padder = InputPadder(image1.shape)
         image1, image2 = padder.pad(image1, image2)
         _, flow = GMA(image1, image2, iters=3, test_mode=True)
-        flow = flow.to(device, memory_format=torch.channels_last)
+        flow = flow.to(device, memory_format=memory_format_for(device))
         return super().get_loss(TF.resize(flow, self.comp.shape[-2:]), img) / self.mag
 
 
@@ -417,7 +420,7 @@ class OpticalFlowLoss(MSELoss):
                 mask = (
                     TF.to_tensor(mask)
                     .unsqueeze(0)
-                    .to(device, memory_format=torch.channels_last)
+                    .to(device, memory_format=memory_format_for(device))
                 )
         if isinstance(mask, torch.Tensor):
             # this is where the inversion is. This mask is naturally inverted :)

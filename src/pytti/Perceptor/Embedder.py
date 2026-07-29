@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 import pytti
 from pytti import cat_with_pad, format_input, format_module, normalize
-from pytti.device import default_device
+from pytti.device import default_device, memory_format_for
 
 # from pytti.ImageGuide import DirectImageGuide
 from pytti.image_models import DifferentiableImage
@@ -109,11 +109,11 @@ class HDMultiClipEmbedder(nn.Module):
         side_x, side_y = diff_image.image_shape
         if input is None:
             input = format_module(diff_image, self).to(
-                device=device, memory_format=torch.channels_last
+                device=device, memory_format=memory_format_for(device)
             )
         else:
             input = format_input(input, diff_image, self).to(
-                device=device, memory_format=torch.channels_last
+                device=device, memory_format=memory_format_for(device)
             )
         max_size = min(side_x, side_y)
         image_embeds = []

@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
 from pytti import default_device, fetch, vram_usage_mode
+from pytti.device import memory_format_for
 from pytti.LossAug.BaseLossClass import Loss
 from pytti.prompt_spec import MaskAll, MaskImage, MaskSpec, MaskVideo
 from pytti.rotoscoper import Rotoscoper
@@ -99,7 +100,7 @@ class MSELoss(Loss):
                 mask = (
                     TF.to_tensor(mask)
                     .unsqueeze(0)
-                    .to(device, memory_format=torch.channels_last)
+                    .to(device, memory_format=memory_format_for(device))
                 )
         if isinstance(mask, torch.Tensor):
             self.mask.set_(mask if not inverted else (1 - mask))
@@ -118,7 +119,7 @@ class MSELoss(Loss):
         out = (
             TF.to_tensor(pil_image)
             .unsqueeze(0)
-            .to(device, memory_format=torch.channels_last)
+            .to(device, memory_format=memory_format_for(device))
         )
         return cls.convert_input(out, None)
 

@@ -163,30 +163,28 @@ class DirectImageGuide:
         # prompts fade out (1 - t)
         t = i / interp_steps if i < interp_steps else 1
 
-        # ---- loss augs + image-model losses: one backward pass of their own.
-        # (Previously these were computed once but backwarded once per
-        # microbatch through a retained graph, holding memory and reporting
-        # a TOTAL of zero.)
-        z = self.image_rep.decode_training_tensor()
-        aug_losses = {
-            aug: aug(format_input(z, self.image_rep, aug), self.image_rep)
-            for aug in loss_augs
-        }
-        image_losses = {aug: aug(self.image_rep) for aug in self.image_rep.image_loss()}
+        # One decode per microbatch; the aug/image-model losses ride along
+        # with the first microbatch's graph so each step needs exactly
+        # gradient_accumulation_steps decodes and backwards (no retained
+        # graphs, no extra decode).
+        microbatches = gradient_accumulation_steps if self.embedder is not None else 1
+        for mb_i in range(microbatches):
+            z_mb = self.image_rep.decode_training_tensor()
+            mb_total = 0
 
-        aug_total = 0
-        for name_losses in (aug_losses, image_losses):
-            for aug, (loss, loss_raw) in name_losses.items():
-                aug_total = aug_total + loss
-                step_record[str(aug)] = float(loss_raw)
-        if isinstance(aug_total, torch.Tensor) and aug_total.requires_grad:
-            aug_total.backward()
-        total_loss += float(aug_total)
+            if mb_i == 0:
+                for aug in loss_augs:
+                    loss, loss_raw = aug(
+                        format_input(z_mb, self.image_rep, aug), self.image_rep
+                    )
+                    mb_total = mb_total + loss
+                    step_record[str(aug)] = float(loss_raw)
+                for aug in self.image_rep.image_loss():
+                    loss, loss_raw = aug(self.image_rep)
+                    mb_total = mb_total + loss
+                    step_record[str(aug)] = float(loss_raw)
 
-        # ---- prompt (CLIP) losses: fresh cutouts per microbatch
-        if self.embedder is not None:
-            for _ in range(gradient_accumulation_steps):
-                z_mb = self.image_rep.decode_training_tensor()
+            if self.embedder is not None:
                 image_embeds, offsets, sizes = self.embedder(
                     self.image_rep, input=z_mb
                 )
@@ -211,10 +209,13 @@ class DirectImageGuide:
                     prompt_total = prompt_total + loss * t
                     step_record[str(prompt)] = float(loss_raw)
 
-                mb_total = (prompt_total + interp_total) / gradient_accumulation_steps
-                if isinstance(mb_total, torch.Tensor) and mb_total.requires_grad:
-                    mb_total.backward()
-                total_loss += float(mb_total)
+                mb_total = mb_total + (
+                    prompt_total + interp_total
+                ) / gradient_accumulation_steps
+
+            if isinstance(mb_total, torch.Tensor) and mb_total.requires_grad:
+                mb_total.backward()
+            total_loss += float(mb_total)
 
         self.optimizer.step()
         self.image_rep.update()

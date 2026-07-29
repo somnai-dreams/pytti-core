@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
 from pytti import named_rearrange, replace_grad, vram_usage_mode
-from pytti.device import default_device
+from pytti.device import default_device, memory_format_for
 from pytti.image_models.differentiable_image import DifferentiableImage
 from pytti.LossAug.HSVLossClass import HSVLoss
 
@@ -333,7 +333,7 @@ class PixelImage(DifferentiableImage):
         colors_disc = F.interpolate(
             colors_disc.movedim(2, 0)
             .unsqueeze(0)
-            .to(self.device, memory_format=torch.channels_last),
+            .to(self.device, memory_format=memory_format_for(self.device)),
             (height, width),
             mode="nearest",
         )
@@ -345,7 +345,7 @@ class PixelImage(DifferentiableImage):
         colors_cont = F.interpolate(
             colors_cont.movedim(2, 0)
             .unsqueeze(0)
-            .to(self.device, memory_format=torch.channels_last),
+            .to(self.device, memory_format=memory_format_for(self.device)),
             (height, width),
             mode="nearest",
         )
