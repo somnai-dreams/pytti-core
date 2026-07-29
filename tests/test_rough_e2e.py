@@ -1,132 +1,88 @@
 """
-Broad strokes, end-to-end testing because something is better than nothing,
-which is what we have right now.
+End-to-end render smokes: tiny configs, real model downloads (CLIP; VQGAN
+for the vqgan cases). Marked `download` so the default CPU test run skips
+them; run explicitly with `pytest -m download`.
+
+3D and Video Source rows additionally need the optional adabins/gma extras
+and are marked `extras`.
 """
+
+from pathlib import Path
 
 import pytest
 from hydra import compose, initialize
 
+from pytti.config.model_names import VQGAN_MODEL_NAMES
+
+pytestmark = pytest.mark.download
+
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
+FIXTURE_VIDEO = str(Path(__file__).parent / "fixtures" / "HebyMorgongava_512kb.mp4")
 
 
-def test_import():
+def render(**overrides):
+    from pytti.workhorse import _hydra_main as render_frames
 
-    assert True
-
-
-# to do: E2E tests generate files, and setting the seed makes that process deterministic.
-# should compare the outputs of these tests with "ground-truth" generated images
-# to ensure consistency
-class _E2e_FromYaml:
-    # def do_the_thing(self, cfg_fpath, **kwargs):
-    def do_the_thing(self, **overrides):
-        # kwargs.update({'conf':cfg_path})
-        from pytti.workhorse import _main as render_frames
-
-        with initialize(config_path=CONFIG_BASE_PATH):
-            cfg = compose(
-                config_name=CONFIG_DEFAULTS,
-                # overrides=[f"conf={cfg_fpath}"],
-                overrides=[f"{k}={v}" for k, v in overrides.items()],
-            )
-            render_frames(cfg)
-
-    def test_limited(self, **kwargs):
-        # self.do_the_thing(cfg_fpath="_test_limited_palette.yaml")
-        self.do_the_thing(conf="_test_limited_palette.yaml", **kwargs)
-        assert True
-
-    def test_unlimited(self, **kwargs):
-        self.do_the_thing(conf="_test_unlimited_palette.yaml", **kwargs)
-        assert True
-
-    def test_vqgan(self, **kwargs):
-        self.do_the_thing(conf="_test_vqgan.yaml", **kwargs)
-        assert True
-
-
-class TestE2e_ImageModels_FromYaml(_E2e_FromYaml):
-    pass
+    with initialize(config_path=CONFIG_BASE_PATH, version_base=None):
+        cfg = compose(
+            config_name=CONFIG_DEFAULTS,
+            overrides=[f"{k}={v}" for k, v in overrides.items()],
+        )
+        render_frames(cfg)
 
 
 @pytest.mark.parametrize(
-    # "animation_mode", ["off","2D","3D","Video Source",
-    # ("foobar", pytest.mark.fail), ("", pytest.mark.fail), (None, pytest.mark.fail)]
-    "kwargs",
-    [{"animation_mode": v} for v in ("off", "2D", "3D", "Video Source")],
+    "conf",
+    ["_test_limited_palette", "_test_unlimited_palette"],
 )
-class TestE2e_AnimationModes_FromYaml(_E2e_FromYaml):
-    def _add_video_path_to_kwargs(self, kwargs):
-        if kwargs["animation_mode"] == "Video Source":
-            kwargs["video_path"] = "./src/pytti/assets/HebyMorgongava_512kb.mp4"
-        return kwargs
+def test_image_models(conf):
+    render(conf=conf)
 
-    def test_limited(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_limited(**kwargs)
 
-    def test_unlimited(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_unlimited(**kwargs)
-
-    def test_vqgan(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_vqgan(**kwargs)
+def test_vqgan():
+    render(conf="_test_vqgan")
 
 
 @pytest.mark.parametrize(
-    # "animation_mode", ["off","2D","3D","Video Source",
-    # ("foobar", pytest.mark.fail), ("", pytest.mark.fail), (None, pytest.mark.fail)]
-    "kwargs",
+    "vqgan_model",
+    VQGAN_MODEL_NAMES,
+)
+def test_vqgan_checkpoints(vqgan_model):
+    render(conf="_test_vqgan", vqgan_model=vqgan_model)
+
+
+def test_animation_2d():
+    render(conf="_test_limited_palette", animation_mode="2D", translate_x="'3'")
+
+
+@pytest.mark.extras
+def test_animation_3d():
+    pytest.importorskip("adabins", reason="needs the [threed] extra")
+    render(conf="_test_limited_palette", animation_mode="3D")
+
+
+@pytest.mark.extras
+def test_animation_video_source():
+    pytest.importorskip("gma", reason="needs the [video] extra")
+    render(
+        conf="_test_limited_palette",
+        animation_mode="Video Source",
+        video_path=FIXTURE_VIDEO,
+    )
+
+
+@pytest.mark.parametrize(
+    "weight_key",
     [
-        {"depth_stabilization_weight": 1},
-        {"flow_stabilization_weight": 1},
-        {"direct_stabilization_weight": 1},
-        {"semantic_stabilization_weight": 1},
-        {"edge_stabilization_weight": 1},
+        "direct_stabilization_weight",
+        "semantic_stabilization_weight",
+        "edge_stabilization_weight",
     ],
 )
-class TestE2e_StabilizationModes_FromYaml(_E2e_FromYaml):
-    def _add_video_path_to_kwargs(self, kwargs):
-        if kwargs.get("animation_mode") == "Video Source":
-            kwargs["video_path"] = "./src/pytti/assets/HebyMorgongava_512kb.mp4"
-        return kwargs
-
-    def test_limited(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_limited(**kwargs)
-
-    def test_unlimited(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_unlimited(**kwargs)
-
-    def test_vqgan(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_vqgan(**kwargs)
-
-
-from pytti.image_models.vqgan import VQGAN_MODEL_NAMES
-
-
-@pytest.mark.parametrize(
-    # "animation_mode", ["off","2D","3D","Video Source",
-    # ("foobar", pytest.mark.fail), ("", pytest.mark.fail), (None, pytest.mark.fail)]
-    "kwargs",
-    [{"vqgan_model": v} for v in VQGAN_MODEL_NAMES],
-)
-class TestE2e_vqgan_models_FromYaml(_E2e_FromYaml):
-    def _add_video_path_to_kwargs(self, kwargs):
-        if kwargs.get("animation_mode") == "Video Source":
-            kwargs["video_path"] = "./src/pytti/assets/HebyMorgongava_512kb.mp4"
-        return kwargs
-
-    def test_limited(self, kwargs):
-        pass
-
-    def test_unlimited(self, kwargs):
-        pass
-
-    def test_vqgan(self, kwargs):
-        kwargs = self._add_video_path_to_kwargs(kwargs)
-        super().test_vqgan(**kwargs)
+def test_stabilization_modes(weight_key):
+    render(
+        conf="_test_limited_palette",
+        init_image=str(Path(__file__).parent / "fixtures" / "01-velo-header-seattle-needle.jpg"),
+        **{weight_key: "1"},
+    )

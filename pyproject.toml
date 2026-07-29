@@ -30,6 +30,16 @@ dependencies = [
     "clip @ git+https://github.com/openai/CLIP.git",
 ]
 
+[project.optional-dependencies]
+# 3D animation (AdaBins monocular depth)
+threed = ["pyttitools-adabins @ git+https://github.com/pytti-tools/AdaBins.git"]
+# Video Source animation + flow stabilization (GMA optical flow)
+video = ["pyttitools-gma @ git+https://github.com/pytti-tools/GMA.git"]
+animation = [
+    "pyttitools-adabins @ git+https://github.com/pytti-tools/AdaBins.git",
+    "pyttitools-gma @ git+https://github.com/pytti-tools/GMA.git",
+]
+
 [project.urls]
 Homepage = "https://github.com/pytti-tools/pytti-core"
 
@@ -74,4 +84,6 @@ testpaths = ["tests"]
 markers = [
     "gpu: requires a CUDA GPU",
     "download: downloads large model checkpoints",
+    "extras: requires the optional adabins/gma extras",
 ]
+addopts = "-m 'not gpu and not download and not extras'"

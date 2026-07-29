@@ -3,10 +3,10 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
-from pytti.image_models.vqgan import (
-    VQGAN_MODEL_NAMES,
-    VQGANImage,
-)
+from pytti.config.model_names import VQGAN_MODEL_NAMES
+from pytti.image_models.vqgan import VQGANImage
+
+pytestmark = pytest.mark.download
 
 # vqgan
 

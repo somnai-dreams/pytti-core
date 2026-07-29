@@ -96,30 +96,30 @@ def _download(url, dest, timeout=60):
 
 
 def load_vqgan_model(config_path, checkpoint_path):
-    # Deferred: taming-transformers is only required for VQGAN mode.
-    from taming.models import cond_transformer, vqgan
+    """
+    Build the frozen VQGAN described by a published taming config + checkpoint
+    pair, using the vendored inference-only models (no pytorch-lightning).
+    Net2NetTransformer checkpoints load just their first-stage weights.
+    """
+    from pytti.vendor.taming.vqgan_models import build_vqgan, load_checkpoint_state
 
     config = OmegaConf.load(config_path)
-    if config.model.target == "taming.models.vqgan.VQModel":
-        model = vqgan.VQModel(**config.model.params)
-        model.eval().requires_grad_(False)
-        model.init_from_ckpt(checkpoint_path)
-        gumbel = False
-    elif config.model.target == "taming.models.cond_transformer.Net2NetTransformer":
-        parent_model = cond_transformer.Net2NetTransformer(**config.model.params)
-        parent_model.eval().requires_grad_(False)
-        parent_model.init_from_ckpt(checkpoint_path)
-        model = parent_model.first_stage_model
-        del parent_model
-        gumbel = False
-    elif config.model.target == "taming.models.vqgan.GumbelVQ":
-        model = vqgan.GumbelVQ(**config.model.params)
-        model.eval().requires_grad_(False)
-        model.init_from_ckpt(checkpoint_path)
-        gumbel = True
-    else:
-        raise ValueError(f"unknown model type: {config.model.target}")
-    del model.loss
+    model, gumbel = build_vqgan(config)
+
+    state = load_checkpoint_state(checkpoint_path)
+    if config.model.target.endswith("Net2NetTransformer"):
+        prefix = "first_stage_model."
+        state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
+    # drop training-only weights (discriminator/LPIPS live under loss.*)
+    state = {k: v for k, v in state.items() if not k.startswith("loss.")}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        raise RuntimeError(
+            f"VQGAN checkpoint {checkpoint_path} is missing weights: {missing[:5]}..."
+        )
+    if unexpected:
+        logger.debug(f"Ignored {len(unexpected)} training-only checkpoint keys")
+    model.eval().requires_grad_(False)
     return model, gumbel
 
 
