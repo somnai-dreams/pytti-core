@@ -58,7 +58,7 @@ def get_frames(path, params=None):
         ]
         logger.debug(cmd)
 
-        subprocess.run(cmd)
+        subprocess.run(cmd, check=True)
 
         logger.debug(f"Converted {in_fname} to {out_fname}.")
 
@@ -74,13 +74,12 @@ def get_frames(path, params=None):
 
 
 class Rotoscoper:
-    def __init__(self, video_path, target=None, thresh=None):
-        global ROTOSCOPERS  # redundant, but leaving it here to document the globals
-        if video_path[0] == "-":
+    def __init__(self, video_path, target=None, inverted=False):
+        if not video_path:
+            raise ValueError("Rotoscoper needs a non-empty video path")
+        if video_path.startswith("-"):
             video_path = video_path[1:]
             inverted = True
-        else:
-            inverted = False
 
         self.frames = get_frames(video_path)
         self.target = target

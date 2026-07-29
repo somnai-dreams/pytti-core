@@ -1,4 +1,4 @@
-import os
+import gc
 import urllib.request
 from pathlib import Path
 
@@ -10,7 +10,13 @@ from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 from tqdm import tqdm
 
-from pytti import clamp_with_grad, default_device, replace_grad, vram_usage_mode
+from pytti import (
+    clamp_with_grad,
+    default_device,
+    empty_cache,
+    replace_grad,
+    vram_usage_mode,
+)
 from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 from pytti.image_models import EMAImage
 
@@ -55,33 +61,38 @@ VQGAN_CHECKPOINT_URLS = {
 }
 
 
-def _download(url, dest):
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+def _download(url, dest, timeout=60):
+    """
+    Download url to dest atomically (via a .part temp file, renamed on
+    success), so an interrupted download can never leave a truncated file
+    that later passes the exists() cache check.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return True
 
-    with urllib.request.urlopen(url) as source:
-        file_size = int(source.info().get("Content-Length"))
-
-        # Check if file already downloaded
-        if os.path.isfile(dest):
-            if os.path.getsize(dest) == file_size:
-                return True
-            else:
-                logger.warning(
-                    f"WARNING: Pre-existing file at {dest} does not match the download size, overwriting."
-                )
-
-        print(f"Downloading {url} to {dest} ({file_size//1024}KB)")
-
-        with open(dest, "wb") as output, tqdm(total=file_size) as loop:
+    req = urllib.request.Request(url, headers={"User-Agent": "pytti-core"})
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(req, timeout=timeout) as source:
+        length = source.info().get("Content-Length")
+        total = int(length) if length is not None else None
+        logger.info(f"Downloading {url} to {dest}")
+        with open(tmp, "wb") as output, tqdm(total=total) as progress:
             while True:
-                buffer = source.read(8192)
+                buffer = source.read(65536)
                 if not buffer:
                     break
-
                 output.write(buffer)
-                loop.update(len(buffer))
-
-        return os.path.getsize(dest) == file_size
+                progress.update(len(buffer))
+    if total is not None and tmp.stat().st_size != total:
+        tmp.unlink()
+        raise OSError(
+            f"Download of {url} was truncated "
+            f"({tmp.stat().st_size if tmp.exists() else 0}/{total} bytes)"
+        )
+    tmp.rename(dest)
+    return True
 
 
 def load_vqgan_model(config_path, checkpoint_path):
@@ -146,7 +157,8 @@ class VQGANImage(EMAImage):
                     "ERROR: model is None and VQGAN is not initialized loaded"
                 )
 
-        if VQGAN_IS_GUMBEL:
+        is_gumbel = hasattr(model.quantize, "embed")
+        if is_gumbel:
             e_dim = 256
             n_toks = model.quantize.n_embed
             vqgan_quantize_embedding = model.quantize.embed.weight
@@ -172,7 +184,7 @@ class VQGANImage(EMAImage):
         z = self.rand_latent(vqgan_quantize_embedding=vqgan_quantize_embedding)
         super().__init__(sideX, sideY, z, ema_val)
         self.output_axes = ("n", "s", "y", "x")
-        self.lr = 0.15 if VQGAN_IS_GUMBEL else 0.1
+        self.lr = 0.15 if is_gumbel else 0.1
         self.latent_strength = 1
 
         # extract the parts of VQGAN we need
@@ -316,5 +328,9 @@ class VQGANImage(EMAImage):
 
     @staticmethod
     def free_vqgan():
-        global VQGAN_MODEL
-        VQGAN_MODEL = None  # should this maybe be `del VQGAN_MODEL` instead?
+        global VQGAN_MODEL, VQGAN_NAME, VQGAN_IS_GUMBEL
+        VQGAN_MODEL = None
+        VQGAN_NAME = None
+        VQGAN_IS_GUMBEL = None
+        gc.collect()
+        empty_cache()

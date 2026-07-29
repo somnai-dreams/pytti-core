@@ -1,4 +1,3 @@
-import argparse
 import gc
 import math
 
@@ -40,38 +39,20 @@ def init_GMA(checkpoint_path=None, device=None):
         device = default_device()
     if GMA is None:
         with vram_usage_mode("GMA"):
-            # migrate this to a hydra initialize/compose operation
-            parser = argparse.ArgumentParser()
-            parser.add_argument(
-                "--model", help="restore checkpoint", default=checkpoint_path
+            args = SimpleNamespace(
+                model=checkpoint_path,
+                model_name="GMA",
+                path=None,
+                num_heads=1,
+                position_only=False,
+                position_and_content=False,
+                mixed_precision=False,
             )
-            parser.add_argument("--model_name", help="define model name", default="GMA")
-            parser.add_argument("--path", help="dataset for evaluation")
-            parser.add_argument(
-                "--num_heads",
-                default=1,
-                type=int,
-                help="number of heads in attention and aggregation",
-            )
-            parser.add_argument(
-                "--position_only",
-                default=False,
-                action="store_true",
-                help="only use position-wise attention",
-            )
-            parser.add_argument(
-                "--position_and_content",
-                default=False,
-                action="store_true",
-                help="use position and content-wise attention",
-            )
-            parser.add_argument(
-                "--mixed_precision", action="store_true", help="use mixed precision"
-            )
-            args = parser.parse_args([])
-            GMA = torch.nn.DataParallel(RAFTGMA(args), device_ids=[device])
-            # GMA = RAFTGMA(args)
-            GMA.load_state_dict(torch.load(checkpoint_path))
+            state = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            # checkpoints were saved from a DataParallel wrapper
+            state = {k.removeprefix("module."): v for k, v in state.items()}
+            GMA = RAFTGMA(args)
+            GMA.load_state_dict(state)
             GMA.to(device)
             GMA.eval()
 
@@ -223,7 +204,9 @@ class OpticalFlowLoss(MSELoss):
         motionedge = torch.cat([f_x, f_y]).square().sum(dim=(0, 1))
 
         height, width = flow_forward.shape[-2:]
-        y, x = torch.meshgrid([torch.arange(0, height), torch.arange(0, width)])
+        y, x = torch.meshgrid(
+            [torch.arange(0, height), torch.arange(0, width)], indexing="ij"
+        )
         x = x.to(device)
         y = y.to(device)
 
@@ -338,7 +321,7 @@ class OpticalFlowLoss(MSELoss):
             if not isinstance(device, torch.device):
                 device = torch.device(device)
             # logger.debug(device)
-            state_dict = torch.load(path, map_location=device)
+            state_dict = torch.load(path, map_location=device, weights_only=True)
             img.load_state_dict(state_dict)
 
         gc.collect()
@@ -365,7 +348,6 @@ class OpticalFlowLoss(MSELoss):
         # flow_backward = self.get_flow(image2, image1, device=device)
         flow_forward = OpticalFlowLoss.get_flow(image1, image2, device=device)
         flow_backward = OpticalFlowLoss.get_flow(image2, image1, device=device)
-        unwarped_target_direct = img.decode_tensor()
         flow_target_direct = apply_flow(
             img, -flow_backward, border_mode=border_mode, sampling_mode=sampling_mode
         )
@@ -422,11 +404,11 @@ class OpticalFlowLoss(MSELoss):
         if device is None:
             device = getattr(self, "device", None) or default_device()
         if isinstance(mask, str) and mask != "":
-            if mask[0] == "-":
+            if mask.startswith("-"):
                 mask = mask[1:]
                 inverted = True
-            if mask.strip()[-4:] == ".mp4":
-                r = Rotoscoper(mask, self)
+            if Path(mask.strip()).suffix.lower() == ".mp4":
+                r = Rotoscoper(mask, self, inverted=inverted)
                 r.update(0)
                 return
             mask = Image.open(fetch(mask)).convert("L")
@@ -437,7 +419,7 @@ class OpticalFlowLoss(MSELoss):
                     .unsqueeze(0)
                     .to(device, memory_format=torch.channels_last)
                 )
-        if mask not in ["", None]:
+        if isinstance(mask, torch.Tensor):
             # this is where the inversion is. This mask is naturally inverted :)
             # since it selects the background
             self.bg_mask.set_(mask if inverted else (1 - mask))

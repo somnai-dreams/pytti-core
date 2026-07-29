@@ -1,20 +1,12 @@
 import math
 
+import torch
 from torch import nn, optim
 from tqdm import tqdm
 
 from pytti import format_input
 from pytti.AudioParse import SpectralAudioParser
 from pytti.image_models.differentiable_image import DifferentiableImage
-
-
-def unpack_dict(D, n=2):
-    """
-    Given a dictionary D whose values are n-tuples, return a tuple of n
-    dictionaries, each mapping the same keys to one tuple slot.
-    """
-    ds = [{k: V[i] for k, V in D.items()} for i in range(n)]
-    return tuple(ds)
 
 
 class DirectImageGuide:
@@ -150,82 +142,75 @@ class DirectImageGuide:
         promts: (ClipPrompt list) list of prompts
         """
         self.optimizer.zero_grad()
-        z = self.image_rep.decode_training_tensor()
-        losses = []
+        total_loss = 0.0
+        step_record: dict[str, float] = {}
 
+        # interpolation ramp: prompts fade in (t) while the previous scene's
+        # prompts fade out (1 - t)
+        t = i / interp_steps if i < interp_steps else 1
+
+        # ---- loss augs + image-model losses: one backward pass of their own.
+        # (Previously these were computed once but backwarded once per
+        # microbatch through a retained graph, holding memory and reporting
+        # a TOTAL of zero.)
+        z = self.image_rep.decode_training_tensor()
         aug_losses = {
             aug: aug(format_input(z, self.image_rep, aug), self.image_rep)
             for aug in loss_augs
         }
+        image_losses = {aug: aug(self.image_rep) for aug in self.image_rep.image_loss()}
 
-        image_augs = self.image_rep.image_loss()
-        image_losses = {aug: aug(self.image_rep) for aug in image_augs}
+        aug_total = 0
+        for name_losses in (aug_losses, image_losses):
+            for aug, (loss, loss_raw) in name_losses.items():
+                aug_total = aug_total + loss
+                step_record[str(aug)] = float(loss_raw)
+        if isinstance(aug_total, torch.Tensor) and aug_total.requires_grad:
+            aug_total.backward()
+        total_loss += float(aug_total)
 
-        losses, losses_raw = [], []
-        # NB(known bug, fix in correctness slice): total_loss is never
-        # accumulated across the microbatch loop, so the reported TOTAL is
-        # always 0 and `stop` can never trigger. Preserved as-is for now.
-        total_loss = 0
+        # ---- prompt (CLIP) losses: fresh cutouts per microbatch
+        if self.embedder is not None:
+            for _ in range(gradient_accumulation_steps):
+                z_mb = self.image_rep.decode_training_tensor()
+                image_embeds, offsets, sizes = self.embedder(
+                    self.image_rep, input=z_mb
+                )
 
-        for mb_i in range(gradient_accumulation_steps):
-            t = 1
-            interp_losses = [0]
-            prompt_losses = {}
-            if self.embedder is not None:
-                image_embeds, offsets, sizes = self.embedder(self.image_rep, input=z)
-
+                interp_total = 0
                 if i < interp_steps:
-                    t = i / interp_steps
-                    interp_losses = [
-                        prompt(
+                    for prompt in interp_prompts:
+                        loss, _ = prompt(
                             format_input(image_embeds, self.embedder, prompt),
                             format_input(offsets, self.embedder, prompt),
                             format_input(sizes, self.embedder, prompt),
-                        )[0]
-                        * (1 - t)
-                        for prompt in interp_prompts
-                    ]
+                        )
+                        interp_total = interp_total + loss * (1 - t)
 
-                prompt_losses = {
-                    prompt: prompt(
+                prompt_total = 0
+                for prompt in prompts:
+                    loss, loss_raw = prompt(
                         format_input(image_embeds, self.embedder, prompt),
                         format_input(offsets, self.embedder, prompt),
                         format_input(sizes, self.embedder, prompt),
                     )
-                    for prompt in prompts
-                }
+                    prompt_total = prompt_total + loss * t
+                    step_record[str(prompt)] = float(loss_raw)
 
-            losses, losses_raw = zip(
-                *map(unpack_dict, [prompt_losses, aug_losses, image_losses])
-            )
-            losses = list(losses)
-            losses_raw = list(losses_raw)
+                mb_total = (prompt_total + interp_total) / gradient_accumulation_steps
+                if isinstance(mb_total, torch.Tensor) and mb_total.requires_grad:
+                    mb_total.backward()
+                total_loss += float(mb_total)
 
-            for v in prompt_losses.values():
-                v[0].mul_(t)
-
-            total_loss_mb = sum(map(lambda x: sum(x.values()), losses)) + sum(
-                interp_losses
-            )
-
-            total_loss_mb /= gradient_accumulation_steps
-            total_loss_mb.backward(retain_graph=True)
-
-        losses_raw.append({"TOTAL": total_loss})
         self.optimizer.step()
         self.image_rep.update()
         self.optimizer.zero_grad()
 
+        step_record["TOTAL"] = total_loss
         if save_loss:
-            self.loss_history.append(
-                {
-                    str(k): float(v)
-                    for loss_dict in losses_raw
-                    for k, v in loss_dict.items()
-                }
-            )
+            self.loss_history.append(step_record)
 
-        return {"TOTAL": float(total_loss)}
+        return {"TOTAL": total_loss}
 
     def update(self, model, img, i, stage_i, *args, **kwargs):
         """

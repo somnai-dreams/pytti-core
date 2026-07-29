@@ -13,90 +13,126 @@ class SpectralAudioParser:
     the amplitude is normalized into the 0..1 range for easier use in transformation functions.
     """
 
-    def __init__(
-            self,
-            input_audio,
-            offset,
-            frames_per_second,
-            filters
-    ):
+    def __init__(self, input_audio, offset, frames_per_second, filters):
         if len(filters) < 1:
-            raise RuntimeError("When using input_audio, at least 1 filter must be specified")
+            raise ValueError(
+                "When using input_audio, at least 1 audio filter must be specified"
+            )
+        for filt in filters:
+            _validate_filter(filt)
 
-        pipe = subprocess.Popen(['ffmpeg', '-i', input_audio,
-                                 '-f', 's16le',
-                                 '-acodec', 'pcm_s16le',
-                                 '-ar', str(SAMPLERATE),
-                                 '-ac', '1',
-                                 '-'], stdout=subprocess.PIPE, bufsize=10 ** 8)
+        pipe = subprocess.Popen(
+            # fmt: off
+            [
+                "ffmpeg", "-i", input_audio,
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ar", str(SAMPLERATE),
+                "-ac", "1",
+                "-",
+            ],
+            # fmt: on
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10**8,
+        )
 
-        self.audio_samples = np.array([], dtype=np.int16)
-
-        # read the audio file from the pipe in 0.5s blocks (2 bytes per sample)
+        # read the audio from the pipe in 0.5s blocks (2 bytes per sample)
+        chunks = []
         while True:
             buf = pipe.stdout.read(SAMPLERATE)
-            self.audio_samples = np.append(self.audio_samples, np.frombuffer(buf, dtype=np.int16))
+            chunks.append(np.frombuffer(buf, dtype=np.int16))
             if len(buf) < SAMPLERATE:
                 break
-        if len(self.audio_samples) < 0:
-            raise RuntimeError("Audio samples are empty, assuming load failed")
+        _, stderr = pipe.communicate()
+        if pipe.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed to decode {input_audio!r}: "
+                f"{stderr.decode(errors='replace')[-500:]}"
+            )
+        self.audio_samples = np.concatenate(chunks) if chunks else np.array([], np.int16)
+        if len(self.audio_samples) == 0:
+            raise RuntimeError(f"No audio samples decoded from {input_audio!r}")
+
         self.duration = len(self.audio_samples) / SAMPLERATE
         logger.debug(
-            f"initialized audio file {input_audio}, samples read: {len(self.audio_samples)}, total duration: {self.duration}s")
+            f"initialized audio file {input_audio}, samples read: "
+            f"{len(self.audio_samples)}, total duration: {self.duration}s"
+        )
         self.offset = offset
         if offset > self.duration:
-            raise RuntimeError(f"Audio offset set at {offset}s but input audio is only {duration}s long")
+            raise ValueError(
+                f"Audio offset set at {offset}s but input audio is only "
+                f"{self.duration}s long"
+            )
         # analyze all samples for the current frame
         self.window_size = int(1 / frames_per_second * SAMPLERATE)
         self.filters = filters
 
         # parse band maxima first for normalizing the filtered signal to 0..1 at arbitrary points in the file later
-        # this initialization is a bit compute intensive, especially for higher fps numbers, but i couldn't find a cleaner way
-        # (band-passing the entire track instead of windows creates maxima that are way off, some filtering anomaly i don't understand...)
+        # (band-passing the entire track instead of windows creates maxima that are way off)
         steps = int((self.duration - self.offset) * frames_per_second)
         interval = 1 / frames_per_second
         maxima = {}
-        time_steps = np.linspace(0, steps, num=steps) * interval
-        for t in time_steps:
-            sample_offset = int(t * SAMPLERATE)
-            cur_maxima = bp_filtered(self.audio_samples[sample_offset:sample_offset + self.window_size], filters)
-            for key in cur_maxima:
-                if key in maxima:
-                    maxima[key] = max(maxima[key], cur_maxima[key])
-                else:
-                    maxima[key] = cur_maxima[key]
+        for step in range(steps):
+            sample_offset = int(step * interval * SAMPLERATE)
+            cur_maxima = bp_filtered(
+                self.audio_samples[sample_offset : sample_offset + self.window_size],
+                filters,
+            )
+            for key, value in cur_maxima.items():
+                maxima[key] = max(maxima.get(key, value), value)
         self.band_maxima = maxima
-        logger.debug(f"initialized band maxima for {len(filters)} filters: {self.band_maxima}")
+        logger.debug(
+            f"initialized band maxima for {len(filters)} filters: {self.band_maxima}"
+        )
 
     def get_params(self, t) -> dict[str, float]:
         """
-        Return the amplitude parameters at the given point in time t within the audio track, or 0 if the track has ended.
+        Return the amplitude parameters at the given point in time t within the audio track, or {} if the track has ended.
         Amplitude/energy parameters are normalized into the [0,1] range.
         """
-        # Get the point in time (sample-offset) in the track in seconds based on sample-rate
-        sample_offset = int(t * SAMPLERATE + self.offset * SAMPLERATE)
+        sample_offset = int((t + self.offset) * SAMPLERATE)
         logger.debug(f"Analyzing audio at {self.offset + t}s")
         if sample_offset < len(self.audio_samples):
-            window_samples = self.audio_samples[sample_offset:sample_offset + self.window_size]
+            window_samples = self.audio_samples[
+                sample_offset : sample_offset + self.window_size
+            ]
             if len(window_samples) < self.window_size:
-                # audio input file has likely ended
                 logger.debug(
-                    f"Warning: sample offset is out of range at time offset {t + self.offset}s. Returning null result")
+                    f"Audio input ended mid-window at {t + self.offset}s; returning null result"
+                )
                 return {}
             return bp_filtered_norm(window_samples, self.filters, self.band_maxima)
         else:
-            logger.debug("Warning: Audio input has ended. Returning null result")
+            logger.debug("Audio input has ended. Returning null result")
             return {}
 
     def get_duration(self):
         return self.duration
 
 
+def _validate_filter(filt):
+    nyquist = SAMPLERATE / 2
+    lower = filt.f_center - filt.f_width / 2
+    upper = filt.f_center + filt.f_width / 2
+    if not filt.variable_name:
+        raise ValueError(
+            "Every audio filter needs a variable_name to expose to expressions"
+        )
+    if not 0 < lower < upper < nyquist:
+        raise ValueError(
+            f"Audio filter {filt.variable_name!r} has an invalid band: "
+            f"f_center={filt.f_center}, f_width={filt.f_width} gives "
+            f"({lower}, {upper}) Hz; needs 0 < low < high < {nyquist}"
+        )
+
+
 def butter_bandpass(lowcut, highcut, fs, order=5):
     nyq = 0.5 * fs
     low = lowcut / nyq
     high = highcut / nyq
-    sos = butter(order, [low, high], analog=False, btype='bandpass', output='sos')
+    sos = butter(order, [low, high], analog=False, btype="bandpass", output="sos")
     return sos
 
 
@@ -108,12 +144,14 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
 
 def bp_filtered(window_samples, filters) -> dict[str, float]:
     results = {}
-    for filter in filters:
-        offset = filter.f_width / 2
-        lower = filter.f_center - offset
-        upper = filter.f_center + offset
-        filtered = butter_bandpass_filter(window_samples, lower, upper, SAMPLERATE, order=filter.order)
-        results[filter.variable_name] = np.max(np.abs(filtered))
+    for filt in filters:
+        offset = filt.f_width / 2
+        lower = filt.f_center - offset
+        upper = filt.f_center + offset
+        filtered = butter_bandpass_filter(
+            window_samples, lower, upper, SAMPLERATE, order=filt.order
+        )
+        results[filt.variable_name] = np.max(np.abs(filtered))
     return results
 
 

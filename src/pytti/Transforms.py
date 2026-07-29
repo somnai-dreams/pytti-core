@@ -131,6 +131,51 @@ def zoom_2d(
     return img.decode_image()
 
 
+def perspective_matrix(
+    fov_rad: float, aspect: float, near: float = 0.1, far: float = 4.0
+) -> torch.Tensor:
+    """
+    Right-handed OpenGL-style projection matrix (row-major math convention).
+    Only the x/y/w rows influence the computed 2D flow — z is divided away —
+    so near/far only shape the (unused) depth output.
+    """
+    g = 1.0 / math.tan(fov_rad / 2)
+    m = torch.zeros(4, 4)
+    m[0, 0] = g / aspect
+    m[1, 1] = g
+    m[2, 2] = (far + near) / (near - far)
+    m[2, 3] = 2 * far * near / (near - far)
+    m[3, 2] = -1.0
+    return m
+
+
+def quaternion_matrix(w: float, x: float, y: float, z: float) -> torch.Tensor:
+    """4x4 rotation matrix from a (w, x, y, z) quaternion (normalized here)."""
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm == 0:
+        raise ValueError("rotate_3d quaternion must be non-zero, got [0, 0, 0, 0]")
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    m = torch.eye(4)
+    m[0, 0] = 1 - 2 * (y * y + z * z)
+    m[0, 1] = 2 * (x * y - w * z)
+    m[0, 2] = 2 * (x * z + w * y)
+    m[1, 0] = 2 * (x * y + w * z)
+    m[1, 1] = 1 - 2 * (x * x + z * z)
+    m[1, 2] = 2 * (y * z - w * x)
+    m[2, 0] = 2 * (x * z - w * y)
+    m[2, 1] = 2 * (y * z + w * x)
+    m[2, 2] = 1 - 2 * (x * x + y * y)
+    return m
+
+
+def translation_matrix(tx: float, ty: float, tz: float) -> torch.Tensor:
+    m = torch.eye(4)
+    m[0, 3] = tx
+    m[1, 3] = ty
+    m[2, 3] = tz
+    return m
+
+
 @torch.no_grad()
 def render_image_3d(
     image,
@@ -156,7 +201,9 @@ def render_image_3d(
     if device is None:
         device = image.device
     logger.debug(device)
-    y, x = torch.meshgrid(torch.linspace(-1, 1, h), torch.linspace(-f, f, w))
+    y, x = torch.meshgrid(
+        torch.linspace(-1, 1, h), torch.linspace(-f, f, w), indexing="ij"
+    )
     x = x.unsqueeze(0).unsqueeze(0)
     y = y.unsqueeze(0).unsqueeze(0)
     xy = torch.cat([x, y], dim=1).to(device)
@@ -173,18 +220,18 @@ def render_image_3d(
     # depth = depth.to(device)
 
     view_pos = torch.cat([xy, -depth, torch.ones_like(depth)], dim=1)
-    # view_pos = view_pos.to(device)
-    # apply the camera move matrix
-    next_view_pos = torch.tensordot(T.float(), view_pos.float(), ([0], [1])).movedim(
+    # apply the camera move matrix (P and T are row-major math matrices, so
+    # contract their column dim against the point channel dim: out = M @ v)
+    next_view_pos = torch.tensordot(T.float(), view_pos.float(), ([1], [1])).movedim(
         0, 1
     )
 
     # apply the perspective matrix
-    clip_pos = torch.tensordot(P.float(), view_pos.float(), ([0], [1])).movedim(0, 1)
+    clip_pos = torch.tensordot(P.float(), view_pos.float(), ([1], [1])).movedim(0, 1)
     clip_pos = clip_pos / (clip_pos[:, 3, ...].unsqueeze(1))
 
     next_clip_pos = torch.tensordot(
-        P.float(), next_view_pos.float(), ([0], [1])
+        P.float(), next_view_pos.float(), ([1], [1])
     ).movedim(0, 1)
     next_clip_pos = next_clip_pos / (next_clip_pos[:, 3, ...].unsqueeze(1))
 
@@ -227,57 +274,24 @@ def zoom_3d(
     width, height = img.image_shape
     px = 2 / height
     alpha = math.radians(fov)
-    depth = 1 / (math.tan(alpha / 2))
 
     pil_image = img.decode_image()
-
-    # pil_image = pil_image.filter(ImageFilter.GaussianBlur(img.scale))
     f = width / height
 
-    # convert depth map
+    # convert depth map: AdaBins metric range (~1e-3..10m) rescaled into the
+    # configured near/far pixel range
     depth_map, depth_resized = DepthLoss.get_depth(pil_image, device=device)
-    depth_min = np.min(depth_map)
-    depth_max = np.max(depth_map)
-    # depth_image = Image.fromarray(np.array(np.interp(depth_map.squeeze(), (depth_min, depth_max), (0,255)), dtype=np.uint8))
     depth_map = np.interp(depth_map, (1e-3, 10), (near * px, far * px))
-    depth_min = np.min(depth_map)
-    depth_max = np.max(depth_map)
 
     depth_median = np.median(depth_map.flatten())
     depth_mean = np.mean(depth_map)
-    r = depth_min / px
-    R = depth_max / px
+    r = np.min(depth_map) / px
+    R = np.max(depth_map) / px
     mu = (depth_mean + depth_median) / (2 * px)
-    ########################################
-    logger.debug(f"depth range: {r} (r) to {R} (R)")
-    logger.debug(f"mu = {mu}")
+    logger.debug(f"depth range: {r} (r) to {R} (R), mu = {mu}")
     translate = [parametric_eval(x, r=r, R=R, mu=mu) for x in translate]
     rotate = parametric_eval(rotate, r=r, R=R, mu=mu)
     logger.debug(f"moving: {translate}")
-
-    # where to get global_step form?
-    # maybe track iterations on a centralized object?
-    # _dx, _dy, _dz = translate
-    # writer.add_scalars(
-    #    main_tag = 'zoom_3d/depth',
-    #    tag_scalar_dict = {
-    #        'r':r,
-    #        'R':R,
-    #        'mu':mu
-    #    }
-    # )
-
-    # writer.add_scalars(
-    #    main_tag = 'zoom_3d/translation',
-    #    tag_scalar_dict = {
-    #        'dx':_dx,
-    #        'dy':_dy,
-    #        'dz':_dz
-    #    }
-    # )
-
-    ########################################
-    logger.debug(device)
     try:
         image_tensor = img.get_image_tensor().to(device)
         depth_tensor = (
@@ -306,16 +320,15 @@ def zoom_3d(
         else:
             depth_tensor = torch.from_numpy(depth_map).squeeze().to(device)
         fallback = True
-    # Deferred: PyGLM is only required for 3D animation.
-    # TODO(slice 3): replace this handful of glm calls with plain torch math.
-    import glm
-
-    p_matrix = torch.as_tensor(glm.perspective(alpha, f, 0.1, 4).to_list()).to(device)
+    p_matrix = perspective_matrix(alpha, f).to(device)
     tx, ty, tz = translate
-    r_matrix = glm.mat4_cast(glm.quat(*rotate))
-    t_matrix = glm.translate(glm.mat4(1), glm.vec3(tx * px, -ty * px, tz * px))
-
-    T_matrix = torch.as_tensor((r_matrix @ t_matrix).to_list()).to(device)
+    if not isinstance(rotate, (list, tuple)) or len(rotate) != 4:
+        raise ValueError(
+            f"rotate_3d must evaluate to a [w, x, y, z] quaternion, got {rotate!r}"
+        )
+    T_matrix = (
+        quaternion_matrix(*rotate) @ translation_matrix(tx * px, -ty * px, tz * px)
+    ).to(device)
     new_image, flow = render_image_3d(
         image_tensor,
         depth_tensor,
@@ -435,10 +448,6 @@ def animate_video_source(
                     img.lock_palette(lock_palette)
                 else:
                     img.encode_image(next_step_pil)
-                # this variable is unused...
-                reencoded = True
-            else:
-                reencoded = False
         else:
             with torch.no_grad():
                 optical_flow.set_mask((mask_tensor - mask_accum).clamp(0, 1))

@@ -27,6 +27,21 @@ def init_AdaBins(device=None):
             logger.debug("AdaBins loaded.")
 
 
+def _model_depth(tensor):
+    """Depth from the raw AdaBins model, downscaling huge inputs first."""
+    height, width = tensor.shape[-2:]
+    max_depth_area = 500000
+    image_area = width * height
+    if image_area > max_depth_area:
+        depth_scale_factor = math.sqrt(max_depth_area / image_area)
+        height, width = int(height * depth_scale_factor), int(width * depth_scale_factor)
+        tensor = TF.resize(
+            tensor, (height, width), interpolation=TF.InterpolationMode.BILINEAR
+        )
+    _, depth_map = infer_helper.model(tensor)
+    return depth_map
+
+
 class DepthLoss(MSELoss):
     @torch.no_grad()
     def set_comp(self, pil_image):
@@ -36,21 +51,8 @@ class DepthLoss(MSELoss):
             self.mask.set_(TF.resize(self.mask, self.comp.shape[-2:]))
 
     def get_loss(self, input, img):
-        height, width = input.shape[-2:]
-        max_depth_area = 500000
-        image_area = width * height
-        if image_area > max_depth_area:
-            depth_scale_factor = math.sqrt(max_depth_area / image_area)
-            height, width = int(height * depth_scale_factor), int(
-                width * depth_scale_factor
-            )
-            depth_input = TF.resize(
-                input, (height, width), interpolation=TF.InterpolationMode.BILINEAR
-            )
-        else:
-            depth_input = input
-
-        _, depth_map = infer_helper.model(depth_input)
+        init_AdaBins(device=input.device)
+        depth_map = _model_depth(input)
         depth_map = F.interpolate(
             depth_map, self.comp.shape[-2:], mode="bilinear", align_corners=True
         )
@@ -59,10 +61,16 @@ class DepthLoss(MSELoss):
     @classmethod
     @vram_usage_mode("Depth Loss")
     def make_comp(cls, pil_image, device=None):
+        # Must run the target image through the *same* depth pipeline the
+        # per-step input uses (_model_depth) — the previous predict_pil-based
+        # comp was on a different scale/normalization, so the MSE compared
+        # incommensurate values.
         if device is None:
             device = default_device()
-        depth, _ = DepthLoss.get_depth(pil_image, device=device)
-        return torch.from_numpy(depth).to(device)
+        init_AdaBins(device=device)
+        tensor = TF.to_tensor(pil_image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            return _model_depth(tensor)
 
     @staticmethod
     def get_depth(pil_image, device=None):

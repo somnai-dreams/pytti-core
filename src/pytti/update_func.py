@@ -75,7 +75,9 @@ def update(
     t = (i - params.pre_animation_steps) / (
         params.steps_per_frame * params.frames_per_second
     )
-    set_t(t, {})
+    # advance expression time every step; bands only roll at frame boundaries
+    # (so <band>_prev really is the previous frame's value)
+    set_t(t)
     if i >= params.pre_animation_steps:
         if (i - params.pre_animation_steps) % params.steps_per_frame == 0:
             if model.audio_parser is not None:

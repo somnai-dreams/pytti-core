@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from pytti import default_device, parametric_eval, replace_grad
+from pytti import default_device, is_zero_weight, parametric_eval, replace_grad
 
 
 class Loss(nn.Module):
@@ -28,7 +28,7 @@ class Loss(nn.Module):
         return self.name
 
     def forward(self, input, img, device=None):
-        if not self.enabled or self.weight in [0, "0"]:
+        if not self.enabled or is_zero_weight(self.weight):
             return 0, 0
         if device is None:
             device = self.device

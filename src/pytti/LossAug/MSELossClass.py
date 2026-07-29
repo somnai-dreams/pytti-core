@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import torch
 from PIL import Image
@@ -68,11 +69,13 @@ class MSELoss(Loss):
         if device is None:
             device = self.device
         if isinstance(mask, str) and mask != "":
-            if mask[0] == "-":
+            if mask.startswith("-"):
                 mask = mask[1:]
                 inverted = True
-            if mask.strip()[-4:] == ".mp4":
-                r = Rotoscoper(mask, self)
+            if Path(mask.strip()).suffix.lower() == ".mp4":
+                # hand the (already-parsed) inversion flag to the rotoscoper —
+                # it re-applies the mask every frame
+                r = Rotoscoper(mask, self, inverted=inverted)
                 r.update(0)
                 return
             mask = Image.open(fetch(mask)).convert("L")
@@ -83,9 +86,11 @@ class MSELoss(Loss):
                     .unsqueeze(0)
                     .to(device, memory_format=torch.channels_last)
                 )
-        if mask not in ["", None]:
+        if isinstance(mask, torch.Tensor):
             self.mask.set_(mask if not inverted else (1 - mask))
-        self.use_mask = mask not in ["", None]
+            self.use_mask = True
+        else:
+            self.use_mask = False
 
     @classmethod
     def convert_input(cls, input, img):
@@ -111,9 +116,10 @@ class MSELoss(Loss):
         input = type(self).convert_input(input, img)
         if self.use_mask:
             if self.mask.shape[-2:] != input.shape[-2:]:
+                # cache the mask at the input's resolution (resize once per
+                # shape change, directly — set_mask would re-apply inversion)
                 with torch.no_grad():
-                    mask = TF.resize(self.mask, input.shape[-2:])
-                    self.set_mask(mask)
+                    self.mask.set_(TF.resize(self.mask, input.shape[-2:]))
             return F.mse_loss(input * self.mask, self.comp * self.mask)
         else:
             return F.mse_loss(input, self.comp)

@@ -254,7 +254,12 @@ def _hydra_main(cfg: DictConfig):
             )
             img.encode_random()
         elif params.image_model == "VQGAN":
-            model_artifacts_path = Path(params.models_parent_dir) / "vqgan"
+            # namespaced cache (~/.cache/pytti/vqgan); fall back to the legacy
+            # un-namespaced location if it already holds downloads
+            model_artifacts_path = Path(params.models_parent_dir) / "pytti" / "vqgan"
+            legacy_path = Path(params.models_parent_dir) / "vqgan"
+            if not model_artifacts_path.exists() and legacy_path.exists():
+                model_artifacts_path = legacy_path
             VQGANImage.init_vqgan(params.vqgan_model, model_artifacts_path, device=device)
             img = VQGANImage(
                 params.width, params.height, params.pixel_size, device=device

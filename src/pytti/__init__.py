@@ -5,7 +5,14 @@ from pytti.device import (
     resolve_device,
     set_default_device,
 )
-from pytti.eval_tools import fetch, parametric_eval, parse, set_t
+from pytti.eval_tools import (
+    fetch,
+    is_zero_weight,
+    parametric_eval,
+    parse,
+    set_bands,
+    set_t,
+)
 from pytti.tensor_tools import (
     cat_with_pad,
     clamp_grad,

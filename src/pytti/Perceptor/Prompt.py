@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 from clip import clip
@@ -15,6 +16,7 @@ from pytti import (
     cat_with_pad,
     fetch,
     format_input,
+    is_zero_weight,
     parametric_eval,
     parse,
     replace_grad,
@@ -34,14 +36,18 @@ def spherical_dist_loss(x, y):
 
 
 def make_mask(mask, thresh):
-    if mask[0] == "[" and mask[-1] == "]":
-        if mask[-5:-1] == ".mp4":
-            # oh yeah this is tacked on
-            return Rotoscoper(mask[1:-1])
-        mask_fun = mask_image(mask[1:-1])
+    if mask.startswith("[") and mask.endswith("]"):
+        inner = mask[1:-1]
+        if Path(inner).suffix.lower() == ".mp4":
+            return Rotoscoper(inner)
+        mask_fun = mask_image(inner)
+    elif mask in MASK_DICT:
+        mask_fun = MASK_DICT[mask]
     else:
-        mask_fun = MASK_DICT.get(mask, mask_semantic(mask))
-    return lambda pos, size, emb: mask_fun(size, pos, emb, parametric_eval(thresh))
+        # semantic masks need a CLIP text encode — only build one when the
+        # mask really is free text, not a geometric key
+        mask_fun = mask_semantic(mask)
+    return lambda pos, size, emb: mask_fun(pos, size, emb, parametric_eval(thresh))
 
 
 @torch.no_grad()
@@ -90,11 +96,9 @@ def mask_image(path, inverted=False, device=None):
     if isinstance(path, Image.Image):
         mask_pil = path
     else:
-        if path[0] == "-":
+        if path.startswith("-"):
             path = path[1:]
             inverted = True
-        else:
-            inverted = False
         mask_pil = Image.open(fetch(path)).convert("L")
     mask_tensor = TF.to_tensor(mask_pil).squeeze().to(device)
     mask_tensor = 1 - mask_tensor if inverted else mask_tensor
@@ -201,13 +205,18 @@ def parse_prompt(embedder, prompt_string="", pil_image=None, device=None):
         weight, r"_(?![^\[]*\])", ["1", "a", "0.5000873264"]
     )  # can you guess what this does?
     text = text.strip()
+    if not text:
+        raise ValueError(
+            f"Prompt {prompt_string!r} has no text — check for stray '|' or ':' "
+            "separators in your scenes."
+        )
     mask = make_mask(mask.strip(), cutoff)
     if isinstance(mask, Rotoscoper):
         roto = mask
         mask = mask_all
     else:
         roto = None
-    if text[0] == "[" and text[-1] == "]":
+    if text.startswith("[") and text.endswith("]"):
         pil_image = Image.open(fetch(text[1:-1].strip())).convert("RGB")
     if pil_image is not None:
         dummy = RGBImage(*pil_image.size)
@@ -284,7 +293,7 @@ class Prompt(nn.Module):
         """
         if device is None:
             device = self.device
-        if not self.enabled or self.weight in ["0", 0]:
+        if not self.enabled or is_zero_weight(self.weight):
             return torch.as_tensor(offset, device=device), offset
         dists_raw = spherical_dist_loss(embed, self.embeds) + offset
         weight = torch.as_tensor(parametric_eval(self.weight), device=device)
