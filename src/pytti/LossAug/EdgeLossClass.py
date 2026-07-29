@@ -1,9 +1,8 @@
-from pytti.LossAug.MSELossClass import MSELoss
-import gc, torch, os, math
-from pytti import DEVICE, vram_usage_mode
-from torchvision.transforms import functional as TF
+import torch
 from torch.nn import functional as F
-from PIL import Image
+from torchvision.transforms import functional as TF
+
+from pytti.LossAug.MSELossClass import MSELoss
 
 
 class EdgeLoss(MSELoss):
@@ -12,7 +11,9 @@ class EdgeLoss(MSELoss):
         return EdgeLoss.get_edges(input)
 
     @staticmethod
-    def get_edges(tensor, device=DEVICE):
+    def get_edges(tensor, device=None):
+        if device is None:
+            device = tensor.device
         tensor = TF.rgb_to_grayscale(tensor)
         dx_ker = (
             torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]])

@@ -1,16 +1,14 @@
 import gc
 import math
 
-from adabins.infer import InferenceHelper
+import torch
 from loguru import logger
 from PIL import Image
-import torch
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 
-from pytti import DEVICE, vram_usage_mode
+from pytti import default_device, empty_cache, vram_usage_mode
 from pytti.LossAug.MSELossClass import MSELoss
-
 
 infer_helper = None
 
@@ -18,10 +16,13 @@ infer_helper = None
 def init_AdaBins(device=None):
     global infer_helper
     if infer_helper is None:
+        # Deferred: adabins is only required for 3D animation / depth losses.
+        from adabins.infer import InferenceHelper
+
         with vram_usage_mode("AdaBins"):
             logger.debug("Loading AdaBins...")
             if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                device = default_device()
             infer_helper = InferenceHelper(dataset="nyu", device=device)
             logger.debug("AdaBins loaded.")
 
@@ -59,7 +60,7 @@ class DepthLoss(MSELoss):
     @vram_usage_mode("Depth Loss")
     def make_comp(cls, pil_image, device=None):
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         depth, _ = DepthLoss.get_depth(pil_image, device=device)
         return torch.from_numpy(depth).to(device)
 
@@ -83,9 +84,9 @@ class DepthLoss(MSELoss):
             depth_resized = False
 
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
         _, depth_map = infer_helper.predict_pil(depth_input)
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
 
         return depth_map, depth_resized

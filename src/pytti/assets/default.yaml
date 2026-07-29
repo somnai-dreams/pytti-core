@@ -6,6 +6,11 @@ defaults:
   - _self_
   - conf: _empty
 
+hydra:
+  job:
+    # run inside outputs/<date>/<time>/ so each run's images_out is isolated
+    chdir: true
+
 #############
 ## Prompts ##
 #############
@@ -218,4 +223,4 @@ models_parent_dir: ${user_cache:}
 ##########################
 
 gradient_accumulation_steps: 1
-device: 0
+device: null  # null = auto (cuda > mps > cpu); or e.g. cuda:1, mps, cpu

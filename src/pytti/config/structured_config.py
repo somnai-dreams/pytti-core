@@ -1,12 +1,8 @@
-from dataclasses import MISSING
-from functools import partial
-from typing import Optional
 
-import hydra
 from attrs import define, field
 from hydra.core.config_store import ConfigStore
 
-from pytti.image_models.vqgan import VQGAN_MODEL_NAMES
+from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 
 
 def check_input_against_list(attribute, value, valid_values):
@@ -41,7 +37,7 @@ class ConfigSchema:
     ##################################
 
     image_model: str = field(default="Unlimited Palette")
-    vqgan_model: str = field(default="sflckr")
+    vqgan_model: str = field(default="sflickr")
     animation_mode: str = field(default="off")
 
     @image_model.validator
@@ -51,7 +47,7 @@ class ConfigSchema:
             value,
             valid_values=[
                 "Unlimited Palette",
-                "Limimted Palette",
+                "Limited Palette",
                 "VQGAN",
             ],
         )
@@ -62,7 +58,7 @@ class ConfigSchema:
         check_input_against_list(
             attribute,
             value,
-            valid_values=VQGAN_MODEL_NAMES,
+            valid_values=VQGAN_MODEL_NAMES + list(VQGAN_MODEL_ALIASES),
         )
 
     @animation_mode.validator
@@ -80,7 +76,7 @@ class ConfigSchema:
     steps_per_frame: int = 50
     interpolation_steps: int = 0
 
-    learning_rate: Optional[float] = None  # based on pytti.Image.DifferentiableImage
+    learning_rate: float | None = None  # based on pytti.Image.DifferentiableImage
     reset_lr_each_frame: bool = True
     seed: str = "${now:%f}"  # microsecond component of timestamp. Basically random.
     cutouts: int = 40
@@ -110,7 +106,7 @@ class ConfigSchema:
 
     input_audio: str = ""
     input_audio_offset: float = 0
-    input_audio_filters: Optional[AudioFilterConfig] = None
+    input_audio_filters: AudioFilterConfig | None = None
 
     #  _2d and _3d only apply to those animation modes
 
@@ -207,7 +203,7 @@ class ConfigSchema:
     backups: int = 0
     show_graphs: bool = False
     approximate_vram_usage: bool = False
-    use_tensorboard: Optional[bool] = False
+    use_tensorboard: bool | None = False
 
     #####################################
 

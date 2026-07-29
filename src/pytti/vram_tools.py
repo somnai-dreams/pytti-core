@@ -1,19 +1,31 @@
-from collections import defaultdict
+"""
+Optional VRAM usage profiling. CUDA-only; every entry point no-ops when
+profiling is disabled or CUDA is unavailable.
+"""
+
+import functools
 import gc
+from collections import defaultdict
+
 import torch
 from loguru import logger
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
 track_vram = False
 usage_mode = "Unknown"
-prev_usage = torch.cuda.memory_allocated(device=DEVICE)
+prev_usage = 0
 usage_dict = defaultdict(lambda: 0)
 usage_frozen = defaultdict(lambda: False)
 
 
+def _allocated() -> int:
+    return torch.cuda.memory_allocated()
+
+
 def vram_profiling(enabled):
     global track_vram
+    if enabled and not torch.cuda.is_available():
+        logger.warning("VRAM profiling requires CUDA; disabling.")
+        enabled = False
     track_vram = enabled
 
 
@@ -23,10 +35,11 @@ def reset_vram_usage():
         return
     if usage_dict:
         logger.warning(
-            "WARNING: VRAM tracking does not work more than once per session. Select `Runtime > Restart runtime` for accurate VRAM usage."
+            "VRAM tracking does not work more than once per process; "
+            "restart for accurate usage numbers."
         )
     usage_mode = "Unknown"
-    prev_usage = torch.cuda.memory_allocated(device=DEVICE)
+    prev_usage = _allocated()
     usage_dict = defaultdict(lambda: 0)
     usage_frozen = defaultdict(lambda: False)
 
@@ -39,12 +52,10 @@ def set_usage_mode(new_mode, force_update=False):
         if not usage_frozen[usage_mode]:
             gc.collect()
             torch.cuda.empty_cache()
-            gc.collect()
-            torch.cuda.empty_cache()
-            current_usage = torch.cuda.memory_allocated(device=DEVICE)
+            current_usage = _allocated()
             delta = current_usage - prev_usage
             if delta < 0 and usage_mode != "Unknown":
-                logger.warning("WARNING:", usage_mode, "has negavive delta of", delta)
+                logger.warning(f"{usage_mode} has negative delta of {delta}")
 
             usage_dict[usage_mode] += delta
             prev_usage = current_usage
@@ -66,19 +77,18 @@ class vram_usage_mode:
         self.mode = mode
 
     def __call__(self, func):
-        global usage_mode
-
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             cached_mode = usage_mode
             set_usage_mode(self.mode)
-            output = func(*args, **kwargs)
-            set_usage_mode(cached_mode)
-            return output
+            try:
+                return func(*args, **kwargs)
+            finally:
+                set_usage_mode(cached_mode)
 
         return wrapper
 
     def __enter__(self):
-        global usage_mode
         self.cached_mode = usage_mode
         set_usage_mode(self.mode)
 
@@ -86,24 +96,25 @@ class vram_usage_mode:
         set_usage_mode(self.cached_mode)
 
 
+def _fmt_bytes(v: float) -> str:
+    if v < 1e3:
+        return f"{v}B"
+    if v < 1e6:
+        return f"{v / 1e3:.2f}kB"
+    if v < 1e9:
+        return f"{v / 1e6:.2f}MB"
+    return f"{v / 1e9:.2f}GB"
+
+
 def print_vram_usage():
-    global usage_mode
     if not track_vram:
         return
     set_usage_mode(usage_mode, force_update=True)
     total = sum(usage_dict.values()) - usage_dict["Unknown"]
-    usage_dict["Unknown"] = torch.cuda.memory_allocated(device=DEVICE) - total
+    usage_dict["Unknown"] = _allocated() - total
     for k, v in usage_dict.items():
-        if v < 1000:
-            logger.info(f"{k}:", f"{v}B")
-        elif v < 1000000:
-            logger.info(f"{k}:", f"{v/1000:.2f}kB")
-        elif v < 1000000000:
-            logger.info(f"{k}:", f"{v/1000000:.2f}MB")
-        else:
-            logger.info(f"{k}:", f"{v/1000000000:.2f}GB")
-
-    logger.info("Total:", f"{total/1000000000:.2f}GB")
+        logger.info(f"{k}: {_fmt_bytes(v)}")
+    logger.info(f"Total: {_fmt_bytes(total)}")
     if total != 0:
-        overhead = (torch.cuda.max_memory_allocated(device=DEVICE) - total) / total
-        logger.info(f"Overhead: {overhead*100:.2f}%")
+        overhead = (torch.cuda.max_memory_allocated() - total) / total
+        logger.info(f"Overhead: {overhead * 100:.2f}%")

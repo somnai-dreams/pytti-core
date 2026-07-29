@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-from pytti import replace_grad, parametric_eval
+
+from pytti import default_device, parametric_eval, replace_grad
 
 
 class Loss(nn.Module):
@@ -14,7 +15,7 @@ class Loss(nn.Module):
         self.name = name
         self.enabled = True
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
 
     def get_loss(self, input, img):

@@ -1,5 +1,7 @@
-from torch.nn import functional as F
 import math
+
+from torch.nn import functional as F
+
 from pytti.LossAug.BaseLossClass import Loss
 
 

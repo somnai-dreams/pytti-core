@@ -1,20 +1,14 @@
-import glm, gc, torch, math, os
+import math
+
+import torch
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-from PIL import Image, ImageFilter
+from PIL import Image
 import numpy as np
-from pytti import parametric_eval
-from pytti.LossAug.DepthLossClass import DepthLoss
-
-# from pytti.Image.PixelImage import PixelImage
-from adabins.infer import InferenceHelper  # Not used here
-
-# TB_LOGDIR = "logs"  # to do: make this more easily configurable
 from loguru import logger
 
-# from torch.utils.tensorboard import SummaryWriter
-
-# writer = SummaryWriter(TB_LOGDIR)
+from pytti import parametric_eval
+from pytti.LossAug.DepthLossClass import DepthLoss
 
 PADDING_MODES = {
     "mirror": "reflection",
@@ -312,6 +306,10 @@ def zoom_3d(
         else:
             depth_tensor = torch.from_numpy(depth_map).squeeze().to(device)
         fallback = True
+    # Deferred: PyGLM is only required for 3D animation.
+    # TODO(slice 3): replace this handful of glm calls with plain torch math.
+    import glm
+
     p_matrix = torch.as_tensor(glm.perspective(alpha, f, 0.1, 4).to_list()).to(device)
     tx, ty, tz = translate
     r_matrix = glm.mat4_cast(glm.quat(*rotate))

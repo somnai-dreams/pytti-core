@@ -8,8 +8,8 @@ The objects defined here probably are only being used in pytti.Perceptor.cutouts
 should be sufficiently general for use in notebooks without pyttitools otherwise in use.
 """
 
+
 import torch
-from typing import Tuple
 from torch.nn import functional as F
 
 PADDING_MODES = {
@@ -49,7 +49,7 @@ def pytti_classic(
     augs,
     noise_fac,
     device,
-) -> Tuple[list, list, list]:
+) -> tuple[list, list, list]:
     """
     This is the cutout method that was already in use in the original pytti.
     """
@@ -103,7 +103,17 @@ def pytti_classic(
                 paddingy + offsety : paddingy + offsety + size,
                 paddingx + offsetx : paddingx + offsetx + size,
             ]
-        cutouts.append(F.adaptive_avg_pool2d(cutout, cut_size))
+        # Bilinear resize instead of adaptive_avg_pool2d: implemented (forward
+        # AND backward) on every backend — MPS lacks non-divisible adaptive
+        # pooling, and antialias=True has no MPS backward.
+        cutouts.append(
+            F.interpolate(
+                cutout,
+                size=(cut_size, cut_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        )
         offsets.append(
             torch.as_tensor([[offsetx / side_x, offsety / side_y]]).to(device)
         )

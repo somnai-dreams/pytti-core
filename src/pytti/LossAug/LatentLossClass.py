@@ -1,10 +1,11 @@
-from pytti.LossAug.MSELossClass import MSELoss
-import gc, torch, os, math
-from torchvision.transforms import functional as TF
-from torch.nn import functional as F
+import math
+
+import torch
 from PIL import Image
-import copy, re
-from pytti import DEVICE, fetch, parse, vram_usage_mode
+from torchvision.transforms import functional as TF
+
+from pytti import default_device, fetch, parse, vram_usage_mode
+from pytti.LossAug.MSELossClass import MSELoss
 
 
 class LatentLoss(MSELoss):
@@ -26,7 +27,7 @@ class LatentLoss(MSELoss):
         )
 
     @torch.no_grad()
-    def set_comp(self, pil_image, device=DEVICE):
+    def set_comp(self, pil_image, device=None):
         self.pil_image = pil_image
         self.has_latent = False
         self.direct_loss.set_comp(pil_image.resize(self.image_shape, Image.LANCZOS))
@@ -35,8 +36,10 @@ class LatentLoss(MSELoss):
     @vram_usage_mode("Latent Image Loss")
     @torch.no_grad()
     def TargetImage(
-        cls, prompt_string, image_shape, pil_image=None, is_path=False, device=DEVICE
+        cls, prompt_string, image_shape, pil_image=None, is_path=False, device=None
     ):
+        if device is None:
+            device = default_device()
         text, weight, stop = parse(
             prompt_string, r"(?<!^http)(?<!s):|:(?!/)", ["", "1", "-inf"]
         )

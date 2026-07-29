@@ -20,6 +20,7 @@ from pytti import Perceptor
 
 from pytti.Perceptor import CLIP_PERCEPTORS
 import torch
+from pytti.device import default_device
 
 # https://stackoverflow.com/questions/15411967/how-can-i-check-if-code-is-executed-in-the-ipython-notebook
 def is_notebook():
@@ -236,7 +237,7 @@ CLIP_MODEL_NAMES = None
 def load_clip(params, device=None):
 
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
 
     # refactor to specify this stuff in a config file
     global CLIP_MODEL_NAMES

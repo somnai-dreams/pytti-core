@@ -1,13 +1,15 @@
-import math, re
+import math
+
+import torch
 from PIL import Image
-from torchvision.transforms import functional as TF
 from torch.nn import functional as F
+from torchvision.transforms import functional as TF
+
+from pytti import default_device, fetch, parse, vram_usage_mode
 from pytti.LossAug.BaseLossClass import Loss
 
 # from pytti.Notebook import Rotoscoper
 from pytti.rotoscoper import Rotoscoper
-from pytti import fetch, parse, vram_usage_mode
-import torch
 
 
 class MSELoss(Loss):
@@ -45,7 +47,7 @@ class MSELoss(Loss):
         text = text.strip()
         mask = mask.strip()
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         if pil_image is None and text != "" and is_path:
             pil_image = Image.open(fetch(text)).convert("RGB")
             im = pil_image.resize(image_shape, Image.LANCZOS)
@@ -92,7 +94,7 @@ class MSELoss(Loss):
     @classmethod
     def make_comp(cls, pil_image, device=None):
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         out = (
             TF.to_tensor(pil_image)
             .unsqueeze(0)

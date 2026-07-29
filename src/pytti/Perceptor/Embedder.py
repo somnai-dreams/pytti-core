@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from .cutouts import augs as cutouts_augs
 from .cutouts import samplers as cutouts_samplers
+from pytti.device import default_device
 
 PADDING_MODES = {
     "mirror": "reflect",
@@ -46,7 +47,7 @@ class HDMultiClipEmbedder(nn.Module):
     ):
         super().__init__()
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         if perceptors is None:
             perceptors = pytti.Perceptor.CLIP_PERCEPTORS

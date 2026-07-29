@@ -1,14 +1,10 @@
 from pathlib import Path
-from os.path import exists as path_exists
-import sys
 import os
 
 from loguru import logger
 
-
-from taming.models import cond_transformer, vqgan
-
-from pytti import replace_grad, clamp_with_grad, vram_usage_mode
+from pytti import default_device, replace_grad, clamp_with_grad, vram_usage_mode
+from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 import torch
 from torch.nn import functional as F
 from pytti.image_models import EMAImage
@@ -23,7 +19,6 @@ VQGAN_NAME = None
 VQGAN_IS_GUMBEL = None
 
 # migrate these to config files
-VQGAN_MODEL_NAMES = ["imagenet", "coco", "wikiart", "sflckr", "openimages"]
 VQGAN_CONFIG_URLS = {
     "imagenet": ["https://heibox.uni-heidelberg.de/f/274fb24ed38341bfa753/?dl=1"],
     # "coco": ["https://dl.nmkd.de/ai/clip/coco/coco.yaml"],
@@ -31,7 +26,7 @@ VQGAN_CONFIG_URLS = {
     "wikiart": [
         "http://eaidata.bmk.sh/data/Wikiart_16384/wikiart_f16_16384_8145600.yaml"
     ],
-    "sflckr": [
+    "sflickr": [
         "https://heibox.uni-heidelberg.de/d/73487ab6e5314cb5adba/files/?p=%2Fconfigs%2F2020-11-09T13-31-51-project.yaml&dl=1"
     ],
     "faceshq": [
@@ -48,7 +43,7 @@ VQGAN_CHECKPOINT_URLS = {
     "wikiart": [
         "http://eaidata.bmk.sh/data/Wikiart_16384/wikiart_f16_16384_8145600.ckpt"
     ],
-    "sflckr": [
+    "sflickr": [
         "https://heibox.uni-heidelberg.de/d/73487ab6e5314cb5adba/files/?p=%2Fcheckpoints%2Flast.ckpt&dl=1"
     ],
     "faceshq": [
@@ -90,6 +85,9 @@ def _download(url, dest):
 
 
 def load_vqgan_model(config_path, checkpoint_path):
+    # Deferred: taming-transformers is only required for VQGAN mode.
+    from taming.models import cond_transformer, vqgan
+
     config = OmegaConf.load(config_path)
     if config.model.target == "taming.models.vqgan.VQModel":
         model = vqgan.VQModel(**config.model.params)
@@ -135,10 +133,10 @@ class VQGANImage(EMAImage):
 
     @vram_usage_mode("VQGAN Image")
     def __init__(
-        self, width, height, scale=1, model=VQGAN_MODEL, ema_val=0.99, device=None
+        self, width, height, scale=1, model=None, ema_val=0.99, device=None
     ):
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
 
         if model is None:
@@ -266,8 +264,8 @@ class VQGANImage(EMAImage):
     @staticmethod
     def init_vqgan(model_name, model_artifacts_path, device=None):
         if device is None:
-            # device = self.device
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
+        model_name = VQGAN_MODEL_ALIASES.get(model_name, model_name)
         global VQGAN_MODEL, VQGAN_NAME, VQGAN_IS_GUMBEL  # uh.... fix this nonsense.
         if VQGAN_NAME == model_name:
             return

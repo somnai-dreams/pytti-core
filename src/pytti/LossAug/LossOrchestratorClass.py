@@ -1,17 +1,14 @@
-from IPython import display
 from loguru import logger
 from PIL import Image
 
 from pytti.image_models import PixelImage
 
 # from pytti.LossAug import build_loss
-from pytti.LossAug import TVLoss, HSVLoss, OpticalFlowLoss, TargetFlowLoss
-from pytti.Perceptor.Prompt import parse_prompt
-
+from pytti.LossAug import OpticalFlowLoss, TargetFlowLoss, TVLoss
 from pytti.LossAug.BaseLossClass import Loss
 from pytti.LossAug.DepthLossClass import DepthLoss
 from pytti.LossAug.EdgeLossClass import EdgeLoss
-
+from pytti.Perceptor.Prompt import parse_prompt
 
 #################################
 
@@ -52,9 +49,7 @@ def configure_init_image(
             # move these logging statements into .encode_image()
             logger.info("Encoding image...")
             img.encode_image(init_image_pil)
-            logger.info("Encoded Image:")
-            # pretty sure this assumes we're in a notebook
-            display.display(img.decode_image())
+            logger.info("Image encoded.")
         # set up init image prompt
         init_augs = ["direct_init_weight"]
         init_augs = [
@@ -125,7 +120,6 @@ def configure_optical_flows(img, params, loss_augs):
             TargetFlowLoss.TargetImage(
                 f"optical flow stabilization:{params.flow_stabilization_weight}",
                 img.image_shape,
-                device="cuda",
             )
         ]
         for optical_flow in optical_flows:

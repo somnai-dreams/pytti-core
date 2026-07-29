@@ -5,6 +5,7 @@ from torchvision.transforms import functional as TF
 from pytti.image_models import DifferentiableImage
 from PIL import Image
 from torch.nn import functional as F
+from pytti.device import default_device
 
 
 class RGBImage(DifferentiableImage):
@@ -15,7 +16,7 @@ class RGBImage(DifferentiableImage):
     def __init__(self, width, height, scale=1, device=None):
         super().__init__(width * scale, height * scale)
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         self.tensor = nn.Parameter(
             torch.zeros(1, 3, height, width).to(

@@ -1,84 +1,53 @@
 """
-Startup helpers.
+Explicit startup helpers for the CLI entry point.
+
+Nothing in here runs at import time: the CLI calls `register_resolvers()` and
+`ensure_configs_exist()` before Hydra composes the config.
 """
-# import os
+
 from pathlib import Path
 
 from loguru import logger
 from omegaconf import OmegaConf
-from pytti import __path__
 
+_ASSETS_DIR = Path(__file__).parent / "assets"
 
-__path__ = __path__[0]
-logger.debug(__path__)
-
-# This should match the path used by PyttiLocalConfigSearchPathPlugin
-# ...which means I should probably initialize it in a way that ensures
-# the path here is kept in synch with the path there.
-# ::sigh:: add it to the pile.
-local_path = Path.cwd() / "config"
-full_local = local_path / "conf"
-default_fname = "default.yaml"
-demo_fname = "demo.yaml"
-empty_fname = "_empty.yaml"
-
-dest_fpath_default = Path(local_path) / default_fname
-dest_fpath_demo = Path(full_local) / demo_fname
-dest_fpath_empty = Path(full_local) / empty_fname
-
-logger.debug(__path__)
-install_dir = Path(__path__)
-shipped_fpath = install_dir / "assets"
-
-src_fpath_default = Path(shipped_fpath) / default_fname
-src_fpath_demo = Path(shipped_fpath) / demo_fname
+# This must match the path used by PyttiLocalConfigSearchPathPlugin
+# (hydra_plugins/pytti_local_config_searchpath_plugin).
+def local_config_dir() -> Path:
+    return Path.cwd() / "config"
 
 
 def ensure_configs_exist():
     """
-    If the config directory doesn't exist, create it with the default and demo configs
+    If ./config doesn't exist, create it with the shipped default and demo
+    configs so `pytti` can run from any directory.
     """
-    # if not default_fpath.exists(): # too aggressive
-    if (
-        local_path.exists()
-    ):  # slightly less stable, but less likely overwrite user content
+    local_path = local_config_dir()
+    conf_dir = local_path / "conf"
+    if local_path.exists():
         logger.debug("Local config directory detected.")
-    else:
-        logger.info("Local config directory not detected.")
-        logger.info("Creating local config directory with default and demo configs")
-        # make the ./config/conf
-        full_local.mkdir(parents=True, exist_ok=True)
-
-        # might be better to use shutils.copy()?
-        read_fpath_default = str(src_fpath_default.resolve())
-        read_fpath_demo = str(src_fpath_demo.resolve())
-        with open(read_fpath_default, "r") as f:
-            default_yaml = f.read()
-        with open(read_fpath_demo, "r") as f:
-            demo_yaml = f.read()
-
-        write_fpath_default = str(dest_fpath_default.resolve())
-        write_fpath_demo = str(dest_fpath_demo.resolve())
-        write_fpath_empty = str(dest_fpath_empty.resolve())
-        with open(write_fpath_default, "w") as f:
-            f.write(default_yaml)
-        with open(write_fpath_demo, "w") as f:
-            f.write(demo_yaml)
-        with open(write_fpath_empty, "w") as f:
-            f.write("\n")
+        return
+    logger.info("Local config directory not detected.")
+    logger.info("Creating local config directory with default and demo configs")
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (local_path / "default.yaml").write_text(
+        (_ASSETS_DIR / "default.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (conf_dir / "demo.yaml").write_text(
+        (_ASSETS_DIR / "demo.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (conf_dir / "_empty.yaml").write_text("\n", encoding="utf-8")
 
 
-# Path.home() == os.path.expanduser('~')
-# user_cache = Path.home() / '.cache'
-# logger.debug(f'user_cache: {user_cache}')
-OmegaConf.register_new_resolver(
-    "user_cache",
-    lambda: str((Path.home() / ".cache").resolve()),
-    replace=True,
-)
-
-OmegaConf.register_new_resolver(
-    "path_join",
-    lambda a, b: str((Path(a) / Path(b)).resolve()),
-    replace=True,
-)
+def register_resolvers():
+    OmegaConf.register_new_resolver(
+        "user_cache",
+        lambda: str((Path.home() / ".cache").resolve()),
+        replace=True,
+    )
+    OmegaConf.register_new_resolver(
+        "path_join",
+        lambda a, b: str((Path(a) / Path(b)).resolve()),
+        replace=True,
+    )

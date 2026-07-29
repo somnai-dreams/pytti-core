@@ -29,6 +29,7 @@ from pytti.image_models import RGBImage
 
 # from pytti.Notebook import Rotoscoper
 from pytti.rotoscoper import Rotoscoper
+from pytti.device import default_device
 
 
 def spherical_dist_loss(x, y):
@@ -90,7 +91,7 @@ def mask_all(pos, size, emb, thresh=0.5):
 @torch.no_grad()
 def mask_image(path, inverted=False, device=None):
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
     if isinstance(path, Image.Image):
         mask_pil = path
     else:
@@ -157,7 +158,7 @@ def mask_image(path, inverted=False, device=None):
 @torch.no_grad()
 def mask_semantic(text, device=None):
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
     perceptors = pytti.Perceptor.CLIP_PERCEPTORS
     embeds = cat_with_pad(
         [p.encode_text(clip.tokenize(text).to(device)).float() for p in perceptors]
@@ -199,7 +200,7 @@ def parse_prompt(embedder, prompt_string="", pil_image=None, device=None):
     :return: A Prompt object.
     """
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
     text, weight, stop = parse(prompt_string, r":(?![^\[]*\])", ["", "1", "-inf"])
     weight, mask, cutoff = parse(
         weight, r"_(?![^\[]*\])", ["1", "a", "0.5000873264"]
@@ -245,7 +246,7 @@ class Prompt(nn.Module):
     ):
         super().__init__()
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         if embeds is not None:
             self.register_buffer("embeds", embeds)

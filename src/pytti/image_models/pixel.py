@@ -1,5 +1,5 @@
 
-from pytti import DEVICE, named_rearrange, replace_grad, vram_usage_mode
+from pytti import named_rearrange, replace_grad, vram_usage_mode
 from pytti.image_models.differentiable_image import DifferentiableImage
 from pytti.LossAug.HSVLossClass import HSVLoss
 
@@ -10,6 +10,7 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torchvision.transforms import functional as TF
 from PIL import Image, ImageOps
+from pytti.device import default_device
 
 
 def break_tensor(tensor):
@@ -39,7 +40,7 @@ class PalletLoss(nn.Module):
     def __init__(self, n_pallets, weight=0.15, device=None):
         super().__init__()
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         self.n_pallets = n_pallets
         self.register_buffer("weight", torch.as_tensor(weight).to(self.device))
@@ -110,7 +111,7 @@ class HdrLoss(nn.Module):
         """
         super().__init__()
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         self.register_buffer(
             "comp",
@@ -183,7 +184,7 @@ class PixelImage(DifferentiableImage):
     ):
         super().__init__(width * scale, height * scale)
         if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = default_device()
         self.device = device
         self.pallet_inertia = 2
         pallet = (

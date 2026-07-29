@@ -1,71 +1,43 @@
 import argparse
 import gc
 import math
-from pathlib import Path
 
-from loguru import logger
 import numpy as np
 import torch
+from loguru import logger
+from PIL import Image
 from torch import nn
 from torch.nn import functional as F
-from PIL import Image
-
-
 from torchvision.transforms import functional as TF
 
-import gma
-from gma.core.network import RAFTGMA
-
-# from gma.core.utils import flow_viz
-from gma.core.utils.utils import InputPadder
-
-# from pytti import fetch, to_pil, DEVICE, vram_usage_mode
-from pytti import fetch, vram_usage_mode
+from pytti import default_device, fetch, vram_usage_mode
 from pytti.LossAug.MSELossClass import MSELoss
 from pytti.rotoscoper import Rotoscoper
 from pytti.Transforms import apply_flow
 
 GMA = None
 
-try:
-    from importlib.resources import files as ir_files0
 
-    logger.debug("using importlib.resources.files")
+def get_gma_checkpoint_path():
+    from importlib.resources import files
 
-    def get_gma_checkpoint_path():
-        root = ir_files0(gma)
-        checkpoint_path = str(next(root.glob("**/*sintel.pth")))
-        return checkpoint_path
+    # Deferred: gma is only required for optical-flow losses.
+    import gma
 
-except:
-    # Patch for colab using old importlib version
-    import pkg_resources
-
-    def ir_files1(module):
-        if pkg_resources.resource_exists(
-            gma.__name__, "data/checkpoints/gma-sintel.pth"
-        ):
-            pathstr = pkg_resources.resource_filename(
-                gma.__name__, "data/checkpoints/gma-sintel.pth"
-            )
-            logger.debug(pathstr)
-            return Path(pathstr)
-        else:
-            raise ValueError("Unable to locate GMA checkpoint.")
-
-    logger.debug("using pkg_resources.resource_filename")
-
-    def get_gma_checkpoint_path():
-        return ir_files1(gma)
+    return str(next(files(gma).glob("**/*sintel.pth")))
 
 
 def init_GMA(checkpoint_path=None, device=None):
+    global GMA
+    if GMA is not None:
+        return
+    from gma.core.network import RAFTGMA
+
     if checkpoint_path is None:
         checkpoint_path = get_gma_checkpoint_path()
         logger.debug(checkpoint_path)
-    global GMA
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
     if GMA is None:
         with vram_usage_mode("GMA"):
             # migrate this to a hydra initialize/compose operation
@@ -190,6 +162,8 @@ class TargetFlowLoss(MSELoss):
             # "GMA/checkpoints/gma-sintel.pth"
             device=device,
         )  # update this to use model dir from config
+        from gma.core.utils.utils import InputPadder
+
         image1 = self.last_step
         image2 = input
         padder = InputPadder(image1.shape)
@@ -297,11 +271,13 @@ class OpticalFlowLoss(MSELoss):
         :return: the flow field.
         """
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = default_device()
         # init_GMA("GMA/checkpoints/gma-sintel.pth")
         init_GMA(
             device=device,
         )
+        from gma.core.utils.utils import InputPadder
+
         if isinstance(image1, Image.Image):
             image1 = TF.to_tensor(image1).unsqueeze(0)  # .to(device)
         if isinstance(image2, Image.Image):
@@ -354,9 +330,7 @@ class OpticalFlowLoss(MSELoss):
         :return: The flow image and the mask.
         """
         if device is None:
-            device = getattr(
-                self, "device", "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            device = getattr(self, "device", None) or default_device()
         logger.debug(device)
         if path is not None:
             # img = img.clone()
@@ -446,9 +420,7 @@ class OpticalFlowLoss(MSELoss):
         :return: Nothing.
         """
         if device is None:
-            device = getattr(
-                self, "device", "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            device = getattr(self, "device", None) or default_device()
         if isinstance(mask, str) and mask != "":
             if mask[0] == "-":
                 mask = mask[1:]

@@ -1,6 +1,7 @@
 import torch
 from clip import clip
 from pytti import vram_usage_mode
+from pytti.device import default_device
 
 CLIP_PERCEPTORS = None
 
@@ -8,7 +9,7 @@ CLIP_PERCEPTORS = None
 @vram_usage_mode("CLIP")
 def init_clip(clip_models, device=None):
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = default_device()
     global CLIP_PERCEPTORS
     if CLIP_PERCEPTORS is None:
         CLIP_PERCEPTORS = [
