@@ -147,6 +147,11 @@ def _hydra_main(cfg: DictConfig):
     if params.animation_mode == False:  # noqa: E712
         params.animation_mode = "off"
 
+    # save_every: 0 means "one frame per animation frame"
+    if params.save_every <= 0:
+        params.save_every = params.steps_per_frame
+        logger.info(f"save_every auto-set to steps_per_frame ({params.save_every})")
+
     logger.debug(OmegaConf.to_container(cfg, resolve=True))
     latest = -1
 
@@ -419,6 +424,7 @@ def _hydra_main(cfg: DictConfig):
             last_frame_semantic=last_frame_semantic,
             init_augs=init_augs,
             semantic_init_prompt=semantic_init_prompt,
+            init_image_pil=init_image_pil,
         )
 
         # Run the training loop

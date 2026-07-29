@@ -182,6 +182,7 @@ class ConfigSchema:
     file_namespace: str = "default"
     allow_overwrite: bool = False
     display_every: int = 50
+    # 0 = save one frame per animation frame (steps_per_frame)
     save_every: int = 50
 
     # crossfade saved frames from init_image to the optimized output over the

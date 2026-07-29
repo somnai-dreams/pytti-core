@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 from loguru import logger
+from PIL import Image
 from torch import nn, optim
 from tqdm import tqdm
 
@@ -18,6 +19,20 @@ from pytti.AudioParse import SpectralAudioParser
 from pytti.image_models.differentiable_image import DifferentiableImage
 from pytti.rotoscoper import update_rotoscopers
 from pytti.Transforms import animate_video_source, zoom_2d, zoom_3d
+
+
+def frame_filename(base_name: str, n: int) -> str:
+    """Zero-padded frame name: sorts correctly and feeds ffmpeg %04d."""
+    return f"{base_name}_{n:04d}.png"
+
+
+def breath_alpha(n: int, num_scenes: int, steps_per_scene: int, save_every: int) -> float:
+    """
+    Blend factor for breath mode at frame n: 0.0 (pure init image) at the
+    start ramping linearly to 1.0 (fully optimized) at the final frame.
+    """
+    total_frames = max(1, (num_scenes * steps_per_scene) // save_every)
+    return min(n / total_frames, 1.0)
 
 
 class DirectImageGuide:
@@ -44,6 +59,7 @@ class DirectImageGuide:
         last_frame_semantic=None,
         semantic_init_prompt=None,
         init_augs=None,
+        init_image_pil=None,
         **optimizer_params,
     ):
         self.image_rep = image_rep
@@ -78,6 +94,7 @@ class DirectImageGuide:
         self.last_frame_semantic = last_frame_semantic
         self.semantic_init_prompt = semantic_init_prompt
         self.init_augs = init_augs
+        self.init_image_pil = init_image_pil
 
     def run_steps(
         self,
@@ -230,16 +247,30 @@ class DirectImageGuide:
         outpath = Path.cwd() / "images_out"
         im = img.decode_image()
         n = (i + 1) // params.save_every
+
+        if params.breath_mode and self.init_image_pil is not None:
+            # crossfade from the init image to the optimized output over the
+            # whole render: frame 1 is (almost) the source, the last frame is
+            # fully optimized
+            num_scenes = max(1, len([s for s in params.scenes.split("||") if s.strip()]))
+            alpha = breath_alpha(
+                n, num_scenes, params.steps_per_scene, params.save_every
+            )
+            init_resized = self.init_image_pil.resize(im.size, Image.LANCZOS)
+            im = Image.blend(init_resized, im, alpha=alpha)
+
         frame_dir = outpath / params.file_namespace
         frame_dir.mkdir(parents=True, exist_ok=True)
-        im.save(frame_dir / f"{self.base_name}_{n}.png")
+        im.save(frame_dir / frame_filename(self.base_name, n))
 
         if params.backups > 0:
             backup_dir = Path("backup") / params.file_namespace
             backup_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(img.state_dict(), backup_dir / f"{self.base_name}_{n}.bak")
+            torch.save(
+                img.state_dict(), backup_dir / f"{self.base_name}_{n:04d}.bak"
+            )
             if n > params.backups:
-                stale = backup_dir / f"{self.base_name}_{n - params.backups}.bak"
+                stale = backup_dir / f"{self.base_name}_{n - params.backups:04d}.bak"
                 if stale.exists():
                     stale.unlink()
 
