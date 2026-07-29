@@ -1,14 +1,12 @@
 from pathlib import Path
 
-from hydra import compose, initialize
-
 import pytest
+from hydra import compose, initialize
 from loguru import logger
 
 from pytti.config.model_names import VQGAN_MODEL_NAMES
 from pytti.image_models.vqgan import VQGANImage
 from pytti.Perceptor import _sanitize_for_config, load_clip
-
 
 CONFIG_BASE_PATH = "config"
 CONFIG_DEFAULTS = "default.yaml"
