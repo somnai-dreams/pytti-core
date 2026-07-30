@@ -211,6 +211,14 @@ class ConfigSchema:
     ### Performance tuning ###
     ##########################
 
+    # batched = one grid_sample for all cutouts (measured ~1.7x on MPS,
+    # bilinear math identical); classic = original per-crop slicing
+    cutout_sampler: str = field(
+        default="classic", validator=_choice(["classic", "batched"])
+    )
+    # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
+    optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))
+
     gradient_accumulation_steps: int = 1
     # None = auto (cuda > mps > cpu); or e.g. "cuda:1", "mps", "cpu"
     device: str | None = None

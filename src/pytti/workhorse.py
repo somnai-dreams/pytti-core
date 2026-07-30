@@ -208,6 +208,7 @@ def _hydra_main(cfg: DictConfig):
             cut_pow=params.cut_pow,
             padding=params.cutout_border,
             border_mode=params.border_mode,
+            cutout_sampler=params.get("cutout_sampler", "classic"),
             device=device,
         )
 

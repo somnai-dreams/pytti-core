@@ -2,7 +2,6 @@ import math
 from collections.abc import Callable
 
 import torch
-from clip import clip
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
@@ -171,9 +170,7 @@ def mask_semantic(text, device=None):
     if device is None:
         device = default_device()
     perceptors = pytti.Perceptor.CLIP_PERCEPTORS
-    embeds = cat_with_pad(
-        [p.encode_text(clip.tokenize(text).to(device)).float() for p in perceptors]
-    )
+    embeds = cat_with_pad([p.embed_text(text, device) for p in perceptors])
 
     @torch.no_grad()
     def mask(pos, size, emb, thresh=0.5):
@@ -236,12 +233,7 @@ def parse_prompt(embedder, prompt_string="", pil_image=None, device=None):
         )
     else:
         perceptors = pytti.Perceptor.CLIP_PERCEPTORS
-        embeds = cat_with_pad(
-            [
-                p.encode_text(clip.tokenize(spec.text).to(device)).float()
-                for p in perceptors
-            ]
-        )
+        embeds = cat_with_pad([p.embed_text(spec.text, device) for p in perceptors])
         out = Prompt(embeds, spec.weight, spec.stop, spec.text, prompt_string, mask=mask)
     if roto is not None:
         roto.target = out

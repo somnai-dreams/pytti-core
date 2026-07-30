@@ -4,7 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 
 import pytti
-from pytti import cat_with_pad, format_input, format_module, normalize
+from pytti import cat_with_pad, format_input, format_module
 from pytti.device import default_device, memory_format_for
 
 # from pytti.ImageGuide import DirectImageGuide
@@ -40,6 +40,7 @@ class HDMultiClipEmbedder(nn.Module):
         padding=0.25,
         border_mode="clamp",
         noise_fac=0.1,
+        cutout_sampler="classic",
         device=None,
     ):
         super().__init__()
@@ -48,7 +49,7 @@ class HDMultiClipEmbedder(nn.Module):
         self.device = device
         if perceptors is None:
             perceptors = pytti.Perceptor.CLIP_PERCEPTORS
-        self.cut_sizes = [p.visual.input_resolution for p in perceptors]
+        self.cut_sizes = [p.cut_size for p in perceptors]
         self.cutn = cutn
         self.noise_fac = noise_fac
         self.augs = cutouts_augs.pytti_classic()
@@ -58,6 +59,7 @@ class HDMultiClipEmbedder(nn.Module):
         self.padding = padding
         self.cut_pow = cut_pow
         self.border_mode = border_mode
+        self.cutout_sampler = cutout_sampler
 
     def make_cutouts(
         self,
@@ -77,7 +79,12 @@ class HDMultiClipEmbedder(nn.Module):
     ) -> tuple[list, list, list]:
         if device is None:
             device = self.device
-        cutouts, offsets, sizes = cutouts_samplers.pytti_classic(
+        sampler = (
+            cutouts_samplers.pytti_batched
+            if self.cutout_sampler == "batched"
+            else cutouts_samplers.pytti_classic
+        )
+        cutouts, offsets, sizes = sampler(
             input=input,
             side_x=side_x,
             side_y=side_y,
@@ -129,7 +136,8 @@ class HDMultiClipEmbedder(nn.Module):
             )
         for cut_size, perceptor in zip(self.cut_sizes, perceptors, strict=True):
             cutouts, offsets, sizes = self.make_cutouts(input, side_x, side_y, cut_size)
-            clip_in = normalize(cutouts)
+            # each perceptor owns its normalization stats (SigLIP != CLIP)
+            clip_in = perceptor.normalize(cutouts)
             image_embeds.append(perceptor.encode_image(clip_in).float().unsqueeze(0))
             all_offsets.append(offsets)
             all_sizes.append(sizes)

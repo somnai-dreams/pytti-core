@@ -27,7 +27,11 @@ dependencies = [
     "tqdm>=4.62",
     "ftfy>=6.1",
     "regex",
-    "clip @ git+https://github.com/openai/CLIP.git",
+    # perceptors: open_clip loads the same OpenAI weights from HF hub
+    # (bit-comparability vs the retired openai/CLIP package: ~6e-6)
+    "open-clip-torch>=2.32",
+    "timm>=1.0.15",
+    "schedulefree>=1.4.1",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +57,7 @@ pytti = "pytti.workhorse:_main"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "lpips>=0.1.4",
     "ruff~=0.16.0",  # pinned: lint verdicts must match between local and CI
     "pyright>=1.1.380",
 ]
