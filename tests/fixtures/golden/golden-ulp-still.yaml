@@ -1,0 +1,31 @@
+# @package _global_
+# Golden STILL — Unlimited Palette (RGB pixels) 512px.
+#
+# Part of the A/B golden suite (plan §4). Rendered via scripts/ab_render.py
+# for HUMAN side-by-side judgment (contact sheet, final diptych) plus
+# LPIPS / MAE / timing metrics. Fixed seed, animation off.
+
+scenes: 'a deep space habitation ring made of glass and golden light | galactic nebula #artstation'
+scene_suffix: '| text:-1:-.95 | watermark:-1:-.95'
+
+image_model: Unlimited Palette
+width: 512
+height: 512
+pixel_size: 1
+
+animation_mode: off
+seed: 47401319
+steps_per_scene: 200
+steps_per_frame: 50
+pre_animation_steps: 50
+
+save_every: 25
+display_every: 50
+backups: 0
+
+cutouts: 40
+cut_pow: 2
+ViTB32: true
+ViTB16: true
+
+file_namespace: golden-ulp-still

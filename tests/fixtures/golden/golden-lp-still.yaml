@@ -1,0 +1,41 @@
+# @package _global_
+# Golden STILL — Limited Palette 512px: the signature pytti look.
+#
+# Part of the A/B golden suite (plan §4). Rendered via scripts/ab_render.py
+# for HUMAN side-by-side judgment (contact sheet, final diptych) plus
+# LPIPS / MAE / timing metrics. Fixed seed, animation off.
+#
+# steps_per_frame + reset_lr_each_frame (default true) deliberately keep the
+# fresh-optimizer-per-"frame" cadence active even in a still, so optimizer
+# slices (schedule-free AdamW) exercise their real regime here.
+
+scenes: 'an ancient stone temple overgrown with bioluminescent vines #artstation | mist, dramatic lighting'
+scene_suffix: '| text:-1:-.95 | watermark:-1:-.95'
+
+image_model: Limited Palette
+width: 512
+height: 512
+pixel_size: 1
+palette_size: 6
+palettes: 9
+gamma: 1
+hdr_weight: 0.01
+smoothing_weight: 0.02
+palette_normalization_weight: 0.2
+
+animation_mode: off
+seed: 20260729
+steps_per_scene: 200
+steps_per_frame: 50
+pre_animation_steps: 50
+
+save_every: 25
+display_every: 50
+backups: 0
+
+cutouts: 40
+cut_pow: 2
+ViTB32: true
+ViTB16: true
+
+file_namespace: golden-lp-still

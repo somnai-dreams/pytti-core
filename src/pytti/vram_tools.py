@@ -1,6 +1,6 @@
 """
-Optional VRAM usage profiling. CUDA-only; every entry point no-ops when
-profiling is disabled or CUDA is unavailable.
+Optional VRAM usage profiling on CUDA or MPS; every entry point no-ops when
+profiling is disabled or no accelerator is available.
 """
 
 import functools
@@ -10,6 +10,8 @@ from collections import defaultdict
 import torch
 from loguru import logger
 
+from pytti.device import default_device, empty_cache
+
 track_vram = False
 usage_mode = "Unknown"
 prev_usage = 0
@@ -18,13 +20,29 @@ usage_frozen = defaultdict(lambda: False)
 
 
 def _allocated() -> int:
-    return torch.cuda.memory_allocated()
+    device_type = default_device().type
+    if device_type == "cuda":
+        return torch.cuda.memory_allocated()
+    if device_type == "mps":
+        return torch.mps.current_allocated_memory()
+    return 0
+
+
+def _peak_allocated() -> int:
+    device_type = default_device().type
+    if device_type == "cuda":
+        return torch.cuda.max_memory_allocated()
+    if device_type == "mps":
+        # MPS has no max_memory_allocated; driver-level total (includes the
+        # allocator's cached blocks) is the closest available peak proxy.
+        return torch.mps.driver_allocated_memory()
+    return 0
 
 
 def vram_profiling(enabled):
     global track_vram
-    if enabled and not torch.cuda.is_available():
-        logger.warning("VRAM profiling requires CUDA; disabling.")
+    if enabled and not (torch.cuda.is_available() or torch.backends.mps.is_available()):
+        logger.warning("VRAM profiling requires CUDA or MPS; disabling.")
         enabled = False
     track_vram = enabled
 
@@ -51,7 +69,7 @@ def set_usage_mode(new_mode, force_update=False):
     if usage_mode != new_mode or force_update:
         if not usage_frozen[usage_mode]:
             gc.collect()
-            torch.cuda.empty_cache()
+            empty_cache()
             current_usage = _allocated()
             delta = current_usage - prev_usage
             if delta < 0 and usage_mode != "Unknown":
@@ -116,5 +134,5 @@ def print_vram_usage():
         logger.info(f"{k}: {_fmt_bytes(v)}")
     logger.info(f"Total: {_fmt_bytes(total)}")
     if total != 0:
-        overhead = (torch.cuda.max_memory_allocated() - total) / total
+        overhead = (_peak_allocated() - total) / total
         logger.info(f"Overhead: {overhead * 100:.2f}%")

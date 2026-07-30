@@ -1,0 +1,36 @@
+# @package _global_
+# Golden STILL — VQGAN (sflickr) 512px: codebook-snapping evolution.
+#
+# NOTE: needs the sflickr taming checkpoint (~1 GB) downloaded into
+# models_parent_dir (pytti fetches it on first use; see
+# src/pytti/image_models/vqgan.py). Not suitable for checkpoint-less CI.
+#
+# Part of the A/B golden suite (plan §4). Rendered via scripts/ab_render.py
+# for HUMAN side-by-side judgment (contact sheet, final diptych) plus
+# LPIPS / MAE / timing metrics. Fixed seed, animation off.
+
+scenes: 'a dreamlike overgrown cathedral interior flooded with shallow water #artstation | volumetric light'
+scene_suffix: '| text:-1:-.95 | watermark:-1:-.95'
+
+image_model: VQGAN
+vqgan_model: sflickr
+width: 512
+height: 512
+pixel_size: 1
+
+animation_mode: off
+seed: 91573024
+steps_per_scene: 200
+steps_per_frame: 50
+pre_animation_steps: 50
+
+save_every: 25
+display_every: 50
+backups: 0
+
+cutouts: 40
+cut_pow: 2
+ViTB32: true
+ViTB16: true
+
+file_namespace: golden-vqgan-still
