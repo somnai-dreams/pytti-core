@@ -1,6 +1,8 @@
 import math
+from contextlib import contextmanager
 from pathlib import Path
 
+import schedulefree
 import torch
 from loguru import logger
 from PIL import Image
@@ -24,6 +26,32 @@ from pytti.Transforms import animate_video_source, zoom_2d, zoom_3d
 def frame_filename(base_name: str, n: int) -> str:
     """Zero-padded frame name: sorts correctly and feeds ffmpeg %04d."""
     return f"{base_name}_{n:04d}.png"
+
+
+def make_optimizer(params_iterable, config_optimizer: str, lr, **optimizer_params):
+    """
+    Build the training optimizer.
+
+    'adam'     -> torch.optim.Adam, exactly the legacy behavior.
+    'adamw_sf' -> schedule-free AdamW (Defazio et al., NeurIPS 2024): no LR
+                  schedule needed, and the eval-mode Polyak-averaged iterate
+                  is what output frames must be decoded from. Returned in
+                  train mode, ready to step.
+    """
+    if config_optimizer == "adam":
+        return optim.Adam(params_iterable, lr=lr, **optimizer_params)
+    if config_optimizer == "adamw_sf":
+        # warmup_steps=10: frames are ~50-step optimization bursts and
+        # reset_lr_each_frame reconstructs the optimizer per frame, so a
+        # short warmup ramp is re-run at every frame boundary.
+        opt = schedulefree.AdamWScheduleFree(
+            params_iterable, lr=lr, warmup_steps=10, **optimizer_params
+        )
+        opt.train()
+        return opt
+    raise ValueError(
+        f"Unknown optimizer {config_optimizer!r}: expected 'adam' or 'adamw_sf'"
+    )
 
 
 def breath_alpha(n: int, num_scenes: int, steps_per_scene: int, save_every: int) -> float:
@@ -64,12 +92,20 @@ class DirectImageGuide:
     ):
         self.image_rep = image_rep
         self.embedder = embedder
+        self.params = params
         if lr is None:
             lr = image_rep.lr
-        optimizer_params["lr"] = lr
+        self.lr = lr
         self.optimizer_params = optimizer_params
+        # bare guides (params=None, e.g. PixelImage's palette fit) always
+        # use plain Adam
+        self.optimizer_name = (
+            "adam" if params is None else params.get("optimizer", "adam")
+        )
         if optimizer is None:
-            self.optimizer = optim.Adam(image_rep.parameters(), **optimizer_params)
+            self.optimizer = make_optimizer(
+                image_rep.parameters(), self.optimizer_name, lr, **optimizer_params
+            )
         else:
             self.optimizer = optimizer
 
@@ -86,7 +122,6 @@ class DirectImageGuide:
                     params.input_audio_filters,
                 )
 
-        self.params = params
         self.base_name = base_name
         self.video_frames = video_frames
         self.optical_flows = optical_flows
@@ -134,9 +169,33 @@ class DirectImageGuide:
         if opt is not None:
             self.optimizer = opt
         else:
-            self.optimizer = optim.Adam(
-                self.image_rep.parameters(), **self.optimizer_params
+            # reset_lr_each_frame lands here once per frame; make_optimizer
+            # re-enters train mode for schedule-free optimizers every time
+            self.optimizer = make_optimizer(
+                self.image_rep.parameters(),
+                self.optimizer_name,
+                self.lr,
+                **self.optimizer_params,
             )
+
+    @contextmanager
+    def optimizer_eval(self):
+        """
+        Decode-for-output context. Schedule-free optimizers hold the fast
+        (extrapolated) iterate in the parameters during training and only
+        swap in the Polyak-averaged iterate on .eval() — decoding a frame
+        outside this context silently emits the un-averaged image. No-op
+        passthrough for plain Adam.
+        """
+        opt = self.optimizer
+        if isinstance(opt, schedulefree.AdamWScheduleFree):
+            opt.eval()
+            try:
+                yield
+            finally:
+                opt.train()
+        else:
+            yield
 
     def clear_loss_history(self):
         self.loss_history = []
@@ -241,39 +300,47 @@ class DirectImageGuide:
             print_vram_usage()
 
     def _save_frame(self, i):
-        img = self.image_rep
-        params = self.params
-        # NB: computed at call time — hydra chdirs into the run's output
-        # directory before the render starts
-        outpath = Path.cwd() / "images_out"
-        im = img.decode_image()
-        n = (i + 1) // params.save_every
+        # The ONE save path: everything decoded/serialized here must see the
+        # averaged (eval) iterate under adamw_sf — the .bak included, so a
+        # restore reproduces the frame that was saved.
+        with self.optimizer_eval():
+            img = self.image_rep
+            params = self.params
+            # NB: computed at call time — hydra chdirs into the run's output
+            # directory before the render starts
+            outpath = Path.cwd() / "images_out"
+            im = img.decode_image()
+            n = (i + 1) // params.save_every
 
-        if params.breath_mode and self.init_image_pil is not None:
-            # crossfade from the init image to the optimized output over the
-            # whole render: frame 1 is (almost) the source, the last frame is
-            # fully optimized
-            num_scenes = max(1, len([s for s in params.scenes.split("||") if s.strip()]))
-            alpha = breath_alpha(
-                n, num_scenes, params.steps_per_scene, params.save_every
-            )
-            init_resized = self.init_image_pil.resize(im.size, Image.LANCZOS)
-            im = Image.blend(init_resized, im, alpha=alpha)
+            if params.breath_mode and self.init_image_pil is not None:
+                # crossfade from the init image to the optimized output over
+                # the whole render: frame 1 is (almost) the source, the last
+                # frame is fully optimized
+                num_scenes = max(
+                    1, len([s for s in params.scenes.split("||") if s.strip()])
+                )
+                alpha = breath_alpha(
+                    n, num_scenes, params.steps_per_scene, params.save_every
+                )
+                init_resized = self.init_image_pil.resize(im.size, Image.LANCZOS)
+                im = Image.blend(init_resized, im, alpha=alpha)
 
-        frame_dir = outpath / params.file_namespace
-        frame_dir.mkdir(parents=True, exist_ok=True)
-        im.save(frame_dir / frame_filename(self.base_name, n))
+            frame_dir = outpath / params.file_namespace
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            im.save(frame_dir / frame_filename(self.base_name, n))
 
-        if params.backups > 0:
-            backup_dir = Path("backup") / params.file_namespace
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                img.state_dict(), backup_dir / f"{self.base_name}_{n:04d}.bak"
-            )
-            if n > params.backups:
-                stale = backup_dir / f"{self.base_name}_{n - params.backups:04d}.bak"
-                if stale.exists():
-                    stale.unlink()
+            if params.backups > 0:
+                backup_dir = Path("backup") / params.file_namespace
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    img.state_dict(), backup_dir / f"{self.base_name}_{n:04d}.bak"
+                )
+                if n > params.backups:
+                    stale = (
+                        backup_dir / f"{self.base_name}_{n - params.backups:04d}.bak"
+                    )
+                    if stale.exists():
+                        stale.unlink()
 
     def update(self, i, stage_i):
         """
