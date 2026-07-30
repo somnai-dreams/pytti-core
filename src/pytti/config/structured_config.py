@@ -211,10 +211,11 @@ class ConfigSchema:
     ### Performance tuning ###
     ##########################
 
-    # batched = one grid_sample for all cutouts (measured ~1.7x on MPS,
-    # bilinear math identical); classic = original per-crop slicing
+    # batched = one grid_sample for all cutouts, no host syncs (sampler ~5x
+    # on MPS, same bilinear math and size/offset distribution); classic =
+    # the original per-crop loop, kept as the legacy preset
     cutout_sampler: str = field(
-        default="classic", validator=_choice(["classic", "batched"])
+        default="batched", validator=_choice(["classic", "batched"])
     )
     # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
     optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))
