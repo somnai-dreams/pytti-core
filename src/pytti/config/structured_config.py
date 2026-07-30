@@ -170,6 +170,12 @@ class ConfigSchema:
     ViTB16: bool = False
     ViTL14: bool = False
     ViTL14_336px: bool = False
+    # FARE robust CLIP: cleaner, perceptually-aligned gradients
+    FARE4ViTB32: bool = False
+    FARE2ViTL14: bool = False
+    # SigLIP2: much stronger prompt semantics than the classic towers
+    SigLIP2B16: bool = False
+    SigLIP2SO400M: bool = False
     RN50: bool = False
     RN101: bool = False
     RN50x4: bool = False

@@ -12,7 +12,7 @@ def test_registry_covers_all_schema_flags():
     clip_flags = {
         f.name
         for f in attrs.fields(ConfigSchema)
-        if f.name.startswith(("ViT", "RN"))
+        if f.name.startswith(("ViT", "RN", "FARE", "SigLIP"))
     }
     assert clip_flags == set(PERCEPTOR_REGISTRY)
 
@@ -22,6 +22,11 @@ def test_registry_names_exist_in_open_clip():
 
     available = {(name, tag) for name, tag in open_clip.list_pretrained()}
     for key, (model_name, pretrained) in PERCEPTOR_REGISTRY.items():
+        if model_name.startswith("hf-hub:"):
+            # config+weights come from the hub repo itself; the pretrained
+            # tag must be None or open_clip would look up a builtin config
+            assert pretrained is None, (key, model_name, pretrained)
+            continue
         assert (model_name, pretrained) in available, (key, model_name, pretrained)
 
 

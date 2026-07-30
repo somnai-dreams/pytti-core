@@ -21,7 +21,9 @@ from pytti.device import default_device, memory_format_for
 CLIP_PERCEPTORS = None
 
 # config key -> (open_clip model name, pretrained tag)
+# "hf-hub:" names carry their own config+weights; pretrained must be None.
 PERCEPTOR_REGISTRY = {
+    # classic tier: the exact OpenAI weights (the 2021 pytti look)
     "ViTB32": ("ViT-B-32-quickgelu", "openai"),
     "ViTB16": ("ViT-B-16-quickgelu", "openai"),
     "ViTL14": ("ViT-L-14-quickgelu", "openai"),
@@ -31,6 +33,26 @@ PERCEPTOR_REGISTRY = {
     "RN50x4": ("RN50x4-quickgelu", "openai"),
     "RN50x16": ("RN50x16-quickgelu", "openai"),
     "RN50x64": ("RN50x64-quickgelu", "openai"),
+    # modern tier: FARE adversarially-robust CLIP (Schlarmann et al.) —
+    # perceptually-aligned gradients through the perceptor. MPS fwd+bwd
+    # benchmarked at parity with the same-size classic towers (2026-07-30:
+    # FARE4-B/32 199ms vs ViT-B/32 211ms at cutn 40).
+    "FARE4ViTB32": ("hf-hub:chs20/FARE4-ViT-B-32-laion2B-s34B-b79K", None),
+    "FARE2ViTL14": ("hf-hub:chs20/fare2-clip", None),
+    # modern tier: SigLIP2 (timm towers) — far stronger prompt semantics
+    # than the classic OpenAI models (~78-85% vs ~63-68% IN-1k zero-shot).
+    # MPS fwd+bwd benchmarked 2026-07-30 at cutn 40: B/16 461ms,
+    # SO400M-256 2778ms — proportionate to size, no pathology.
+    "SigLIP2B16": ("ViT-B-16-SigLIP2", "webli"),
+    "SigLIP2SO400M": ("ViT-SO400M-16-SigLIP2-256", "webli"),
+}
+
+# open_clip issue #1068: cached SigLIP2 loads can silently resolve the wrong
+# preprocess cfg. Pin the stats where we know them; _load_perceptor refuses
+# to run with skewed normalization.
+EXPECTED_NORMALIZE = {
+    "SigLIP2B16": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    "SigLIP2SO400M": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
 }
 
 # names of the perceptor config keys currently loaded into CLIP_PERCEPTORS
@@ -126,6 +148,13 @@ def _load_perceptor(key: str, device) -> LoadedPerceptor:
         raise RuntimeError(
             f"open_clip returned no preprocess stats for {model_name!r} — "
             "refusing to guess normalization (silently wrong gradients)."
+        )
+    expected = EXPECTED_NORMALIZE.get(key)
+    if expected is not None and (tuple(mean), tuple(std)) != expected:
+        raise RuntimeError(
+            f"{key}: resolved preprocess stats (mean={mean}, std={std}) do not "
+            f"match the pinned {expected} — open_clip picked the wrong "
+            "preprocessor (see open_clip issue #1068)."
         )
     image_size = model.visual.image_size
     if isinstance(image_size, (tuple, list)):

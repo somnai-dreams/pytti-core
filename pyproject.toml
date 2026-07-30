@@ -32,6 +32,8 @@ dependencies = [
     "open-clip-torch>=2.32",
     "timm>=1.0.15",
     "schedulefree>=1.4.1",
+    # SigLIP2 tokenizer (open_clip's HFTokenizer imports it lazily)
+    "transformers>=5",
 ]
 
 [project.optional-dependencies]
