@@ -23,6 +23,12 @@ PADDING_MODES = {
     "black": "constant",
 }
 
+CUTOUT_SAMPLERS = {
+    "classic": cutouts_samplers.pytti_classic,
+    "batched": cutouts_samplers.pytti_batched,
+    "smart": cutouts_samplers.pytti_smart,
+}
+
 
 class HDMultiClipEmbedder(nn.Module):
     """
@@ -52,12 +58,17 @@ class HDMultiClipEmbedder(nn.Module):
         self.cut_sizes = [p.cut_size for p in perceptors]
         self.cutn = cutn
         self.noise_fac = noise_fac
-        # the aug stack follows the sampler choice: "batched" is the
+        if cutout_sampler not in CUTOUT_SAMPLERS:
+            raise ValueError(
+                f"unknown cutout_sampler {cutout_sampler!r}; "
+                f"expected one of {sorted(CUTOUT_SAMPLERS)}"
+            )
+        # the aug stack follows the sampler choice: "batched"/"smart" use the
         # sync-free composed-warp stack, "classic" the 2021 kornia one
         self.augs = (
-            cutouts_augs.pytti_batched()
-            if cutout_sampler == "batched"
-            else cutouts_augs.pytti_classic()
+            cutouts_augs.pytti_classic()
+            if cutout_sampler == "classic"
+            else cutouts_augs.pytti_batched()
         )
         self.input_axes = ("n", "s", "y", "x")
         self.output_axes = ("c", "n", "i")
@@ -85,11 +96,7 @@ class HDMultiClipEmbedder(nn.Module):
     ) -> tuple[list, list, list]:
         if device is None:
             device = self.device
-        sampler = (
-            cutouts_samplers.pytti_batched
-            if self.cutout_sampler == "batched"
-            else cutouts_samplers.pytti_classic
-        )
+        sampler = CUTOUT_SAMPLERS[self.cutout_sampler]
         cutouts, offsets, sizes = sampler(
             input=input,
             side_x=side_x,

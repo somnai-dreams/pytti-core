@@ -218,10 +218,13 @@ class ConfigSchema:
     ##########################
 
     # batched = one grid_sample for all cutouts, no host syncs (sampler ~5x
-    # on MPS, same bilinear math and size/offset distribution); classic =
+    # on MPS, same bilinear math and size/offset distribution); smart =
+    # designed two-population sampler (full-frame global anchors + stratified
+    # detail cuts, sync-free like batched) built to hold quality at cutn ~16
+    # instead of ~40 — default flips only after the judged A/B; classic =
     # the original per-crop loop, kept as the legacy preset
     cutout_sampler: str = field(
-        default="batched", validator=_choice(["classic", "batched"])
+        default="batched", validator=_choice(["classic", "batched", "smart"])
     )
     # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
     optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))
