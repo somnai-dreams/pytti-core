@@ -105,6 +105,50 @@ class HDMultiClipEmbedder(nn.Module):
         )
         return cutouts, offsets, sizes
 
+    def cutout_batches(
+        self,
+        diff_image: DifferentiableImage,
+        input=None,
+        device=None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """
+        Per-perceptor (cutouts, offsets, sizes) — everything forward() does
+        before normalization and encoding. Perceptors with the same input
+        resolution share one cutout batch (the SAME tensor objects: sampling
+        + augs + noise cost once instead of per tower). Consumes the RNG
+        stream exactly as forward() does; the MLX bridge calls this so both
+        backends see identical cutouts under a fixed seed.
+        """
+        if device is None:
+            device = self.device
+        side_x, side_y = diff_image.image_shape
+        if input is None:
+            input = format_module(diff_image, self).to(
+                device=device, memory_format=memory_format_for(device)
+            )
+        else:
+            input = format_input(input, diff_image, self).to(
+                device=device, memory_format=memory_format_for(device)
+            )
+
+        paddingx = min(round(side_x * self.padding), side_x)
+        paddingy = min(round(side_y * self.padding), side_y)
+        if self.border_mode != "clamp":
+            input = F.pad(
+                input,
+                (paddingx, paddingx, paddingy, paddingy),
+                mode=PADDING_MODES[self.border_mode],
+            )
+        cutout_cache: dict[int, tuple] = {}
+        batches = []
+        for cut_size in self.cut_sizes:
+            if cut_size not in cutout_cache:
+                cutout_cache[cut_size] = self.make_cutouts(
+                    input, side_x, side_y, cut_size
+                )
+            batches.append(cutout_cache[cut_size])
+        return batches
+
     def forward(
         self,
         # diff_image: DirectImageGuide,
@@ -116,40 +160,14 @@ class HDMultiClipEmbedder(nn.Module):
         diff_image: (DifferentiableImage) input image
         returns images embeds
         """
-        if device is None:
-            device = self.device
-        perceptors = self.perceptors
-        side_x, side_y = diff_image.image_shape
-        if input is None:
-            input = format_module(diff_image, self).to(
-                device=device, memory_format=memory_format_for(device)
-            )
-        else:
-            input = format_input(input, diff_image, self).to(
-                device=device, memory_format=memory_format_for(device)
-            )
+        batches = self.cutout_batches(diff_image, input=input, device=device)
         image_embeds = []
         all_offsets = []
         all_sizes = []
-
-        paddingx = min(round(side_x * self.padding), side_x)
-        paddingy = min(round(side_y * self.padding), side_y)
-        if self.border_mode != "clamp":
-            input = F.pad(
-                input,
-                (paddingx, paddingx, paddingy, paddingy),
-                mode=PADDING_MODES[self.border_mode],
-            )
-        # perceptors with the same input resolution share one cutout batch
-        # (sampling + augs + noise cost once instead of per tower); each
-        # still applies its own normalization stats (SigLIP != CLIP)
-        cutout_cache: dict[int, tuple] = {}
-        for cut_size, perceptor in zip(self.cut_sizes, perceptors, strict=True):
-            if cut_size not in cutout_cache:
-                cutout_cache[cut_size] = self.make_cutouts(
-                    input, side_x, side_y, cut_size
-                )
-            cutouts, offsets, sizes = cutout_cache[cut_size]
+        # each perceptor applies its own normalization stats (SigLIP != CLIP)
+        for perceptor, (cutouts, offsets, sizes) in zip(
+            self.perceptors, batches, strict=True
+        ):
             clip_in = perceptor.normalize(cutouts)
             image_embeds.append(perceptor.encode_image(clip_in).float().unsqueeze(0))
             all_offsets.append(offsets)

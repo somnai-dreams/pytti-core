@@ -113,6 +113,20 @@ class DirectImageGuide:
         # values are detached 0-dim tensors; format at report time only
         self.loss_history: list[dict[str, torch.Tensor]] = []
 
+        # perceptor_backend=mlx: the semantic losses (CLIP tower fwd+bwd +
+        # prompt reduction) run on MLX via the bridge; samplers, augs, image
+        # models, and the optimizer stay torch. None = the torch path.
+        self.mlx_semantic_loss = None
+        if (
+            embedder is not None
+            and params is not None
+            and params.get("perceptor_backend", "torch") == "mlx"
+        ):
+            # local import: only the mlx path pays for loading the towers
+            from pytti.Perceptor.mlx_backend.bridge import MLXSemanticLoss
+
+            self.mlx_semantic_loss = MLXSemanticLoss(embedder)
+
         self.audio_parser = None
         if params is not None:
             if params.input_audio and params.input_audio_filters:
@@ -249,7 +263,20 @@ class DirectImageGuide:
                     mb_total = mb_total + loss
                     step_record[str(aug)] = loss_raw.detach()
 
-            if self.embedder is not None:
+            if self.embedder is not None and self.mlx_semantic_loss is not None:
+                # MLX bridge: one fused fwd+bwd for all semantic prompts.
+                # The interpolation ramp is folded in as per-prompt constants
+                # (see bridge.py); records keep the torch path's names.
+                semantic_total, semantic_records = self.mlx_semantic_loss(
+                    self.image_rep,
+                    z_mb,
+                    prompts,
+                    interp_prompts if i < interp_steps else [],
+                    ramp=t,
+                )
+                step_record.update(semantic_records)
+                mb_total = mb_total + semantic_total / gradient_accumulation_steps
+            elif self.embedder is not None:
                 image_embeds, offsets, sizes = self.embedder(
                     self.image_rep, input=z_mb
                 )

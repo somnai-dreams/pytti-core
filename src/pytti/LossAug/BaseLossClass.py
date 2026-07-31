@@ -29,7 +29,9 @@ class Loss(nn.Module):
 
     def forward(self, input, img, device=None):
         if not self.enabled or is_zero_weight(self.weight):
-            return 0, 0
+            # loss_raw must be a tensor: train() records loss_raw.detach()
+            zero = torch.zeros((), device=device if device else self.device)
+            return zero, zero
         if device is None:
             device = self.device
         weight = torch.as_tensor(parametric_eval(self.weight), device=device)

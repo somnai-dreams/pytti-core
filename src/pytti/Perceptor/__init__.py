@@ -10,6 +10,8 @@ normalization stats: ensemble members do not share preprocessing (SigLIP
 uses mean=std=0.5; applying CLIP constants would silently skew gradients).
 """
 
+import sys
+
 import torch
 from attrs import define
 from loguru import logger
@@ -220,6 +222,27 @@ def load_clip(params, device=None):
     if CLIP_MODEL_NAMES == []:
         free_clip()
         raise RuntimeError("Please select at least one CLIP model")
+
+    if params.get("perceptor_backend", "torch") == "mlx":
+        # pure planning import — safe everywhere, no mlx
+        from pytti.Perceptor.mlx_backend.convert import MLX_VIT_MODELS
+
+        unsupported = [k for k in CLIP_MODEL_NAMES if k not in MLX_VIT_MODELS]
+        if unsupported:
+            raise RuntimeError(
+                f"perceptor_backend=mlx supports only the classic ViT tier "
+                f"{sorted(MLX_VIT_MODELS)} in M1 — no silent mixed engine. "
+                f"Deselect {unsupported} or use perceptor_backend=torch."
+            )
+        if sys.platform != "darwin":
+            raise RuntimeError(
+                "perceptor_backend=mlx requires macOS (MLX is Metal-only); "
+                "use perceptor_backend=torch."
+            )
+        logger.info(
+            f"MLX perceptor backend selected: {CLIP_MODEL_NAMES} will run on "
+            "MLX (torch copies still load for text embedding)."
+        )
     if last_names != CLIP_MODEL_NAMES or CLIP_PERCEPTORS is None:
         free_clip()
         logger.debug(f"Loading perceptors: {CLIP_MODEL_NAMES}")

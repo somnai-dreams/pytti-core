@@ -226,6 +226,13 @@ class ConfigSchema:
     # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
     optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))
 
+    # mlx = run the CLIP towers + prompt-loss reduction on MLX (Apple Metal,
+    # fp16; macOS only, classic ViT towers only — docs/mlx-port-plan.md M1).
+    # torch = the reference engine, every tower, every platform.
+    perceptor_backend: str = field(
+        default="torch", validator=_choice(["torch", "mlx"])
+    )
+
     gradient_accumulation_steps: int = 1
     # None = auto (cuda > mps > cpu); or e.g. "cuda:1", "mps", "cpu"
     device: str | None = None

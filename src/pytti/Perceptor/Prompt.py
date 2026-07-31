@@ -58,7 +58,15 @@ def make_mask(spec: MaskSpec, thresh):
         mask_fun = mask_semantic(spec.text)
     else:
         raise TypeError(f"Unknown mask spec: {spec!r}")
-    return lambda pos, size, emb: mask_fun(pos, size, emb, parametric_eval(thresh))
+
+    def masker(pos, size, emb):
+        return mask_fun(pos, size, emb, parametric_eval(thresh))
+
+    # Semantic masks are the one kind that reads the image embedding; the
+    # MLX bridge computes mask vectors pre-tower (no embedding exists yet)
+    # and uses this to fail loudly instead of silently passing None through.
+    masker.embed_dependent = isinstance(spec, MaskSemantic)
+    return masker
 
 
 @torch.no_grad()
@@ -299,7 +307,9 @@ class Prompt(nn.Module):
         if device is None:
             device = self.device
         if not self.enabled or is_zero_weight(self.weight):
-            return torch.as_tensor(offset, device=device), offset
+            # loss_raw must be a tensor: train() records loss_raw.detach()
+            zero = torch.as_tensor(offset, device=device)
+            return zero, zero
         dists_raw = spherical_dist_loss(embed, self.embeds) + offset
         weight = torch.as_tensor(parametric_eval(self.weight), device=device)
         stop = torch.as_tensor(parametric_eval(self.stop), device=device)
