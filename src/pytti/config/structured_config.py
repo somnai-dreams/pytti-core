@@ -78,7 +78,8 @@ class ConfigSchema:
     learning_rate: float | None = None
     reset_lr_each_frame: bool = True
     seed: int | None = None  # None = a fresh random seed each run
-    cutouts: int = 40
+    # 16 is tuned for the smart sampler; classic/batched want ~40
+    cutouts: int = 16
     cut_pow: float = 2
     cutout_border: float = 0.25
     border_mode: str = field(
@@ -217,14 +218,14 @@ class ConfigSchema:
     ### Performance tuning ###
     ##########################
 
-    # batched = one grid_sample for all cutouts, no host syncs (sampler ~5x
-    # on MPS, same bilinear math and size/offset distribution); smart =
-    # designed two-population sampler (full-frame global anchors + stratified
-    # detail cuts, sync-free like batched) built to hold quality at cutn ~16
-    # instead of ~40 — default flips only after the judged A/B; classic =
-    # the original per-crop loop, kept as the legacy preset
+    # smart (default) = designed two-population sampler: full-frame global
+    # anchors + stratified detail cuts, sync-free. A/B verdict 2026-07-31:
+    # at cutn 16 it BEAT batched@40 on held-out ViT-L/14 adherence
+    # (0.375 vs 0.366) at ~2.3x less tower compute. batched = classic's
+    # distribution in one grid_sample (wants cutn ~40); classic = the
+    # original 2021 per-crop loop, kept as the legacy preset
     cutout_sampler: str = field(
-        default="batched", validator=_choice(["classic", "batched", "smart"])
+        default="smart", validator=_choice(["classic", "batched", "smart"])
     )
     # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
     optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))

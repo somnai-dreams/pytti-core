@@ -46,7 +46,7 @@ class HDMultiClipEmbedder(nn.Module):
         padding=0.25,
         border_mode="clamp",
         noise_fac=0.1,
-        cutout_sampler="batched",
+        cutout_sampler="smart",
         device=None,
     ):
         super().__init__()

@@ -334,13 +334,17 @@ def test_embedder_dispatch_smart():
         HDMultiClipEmbedder(perceptors=[], cutout_sampler="smrat", device="cpu")
 
 
-def test_config_accepts_smart_and_keeps_batched_default():
+def test_config_smart_default_and_batched_selectable():
     with initialize(config_path="config", version_base=None):
         cfg = compose(
             config_name="_structured_config",
-            overrides=["scenes=x", "cutout_sampler=smart"],
+            overrides=["scenes=x", "cutout_sampler=batched"],
         )
-    assert OmegaConf.to_object(cfg).cutout_sampler == "smart"
+    assert OmegaConf.to_object(cfg).cutout_sampler == "batched"
     with initialize(config_path="config", version_base=None):
         cfg = compose(config_name="_structured_config", overrides=["scenes=x"])
-    assert OmegaConf.to_object(cfg).cutout_sampler == "batched"
+    obj = OmegaConf.to_object(cfg)
+    # A/B verdict 2026-07-31: smart@16 beat batched@40 on held-out
+    # adherence at ~2.3x less tower compute
+    assert obj.cutout_sampler == "smart"
+    assert obj.cutouts == 16
