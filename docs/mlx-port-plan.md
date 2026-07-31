@@ -83,6 +83,28 @@ conversion and the non-Mac/animation paths (VQGAN, depth, flow). Projected
 step ~350–420 ms (≥1.9× vs today). Only worth starting once M1's parity
 gates and A/B have held in real use.
 
+## M2 spike results (2026-07-31 — measured, all gates passed)
+
+- Pure-ops gather grid_sample: value parity 0.36/255 fp16, grad cosine
+  1.000000; slower than torch's fused kernel standalone (+4.4 ms/step
+  total) but irrelevant — inside the whole-step compile the entire
+  non-tower chain measures 19.7 ms. No custom Metal kernel needed.
+- Limited Palette decode in MLX: parity 1.5e-8, grads to all param
+  groups, **3.2× faster than torch** (27.9 → 8.7 ms compiled).
+- Whole-step mx.compile (decode→cutouts→augs→real fp16 towers→loss→
+  Adam, RNG in state): nothing refused to compile, no retrace at steady
+  state, 50 steps healthy. 512²/cutn40/2-towers: 399–411 ms;
+  256²/cutn16/B32: **43.9–46.4 ms (~22 it/s)**.
+- HONEST CAVEAT: at full settings M2 buys only ~5–10% over M1
+  (453 → ~415 ms; both tower-bound — M1 already banked the tower win).
+  The M2 payoff is drafts (1.4× over M1, 2.4× over torch) and deleting
+  the DLPack boundary + sync discipline.
+- Build inventory: docs/mlx-m2-seam-map.md (op equivalents, RNG moves,
+  .bak round-trip contract, 7 slices ≈ 7–9 days). Lead rulings:
+  adamw_sf fails loud under the whole-step path v1; animation/VQGAN
+  keep the M1 bridge; gradient accumulation loops in-step; params/Adam
+  fp32 with the fp16 cast at tower entry.
+
 ## Notes
 
 - Two allocators share the GPU in M1: tune `mx.metal.set_cache_limit` if
