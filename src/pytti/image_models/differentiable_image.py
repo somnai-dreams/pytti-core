@@ -33,6 +33,17 @@ class DifferentiableImage(nn.Module):
         """
         return self.decode_tensor()
 
+    def forward(self):
+        """
+        Decode when called as a module. Reachable via format_module()
+        (nn.Module.__call__) from the Embedder whenever an image prompt /
+        init-image semantic path embeds a wrapper image directly — deleting
+        this broke every init-image render with NotImplementedError.
+        """
+        if self.training:
+            return self.decode_training_tensor()
+        return self.decode_tensor()
+
     def get_image_tensor(self):
         """
         optional method: returns an [n x w_i x h_i] tensor representing the local image data
