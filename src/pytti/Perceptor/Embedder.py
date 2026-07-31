@@ -52,7 +52,13 @@ class HDMultiClipEmbedder(nn.Module):
         self.cut_sizes = [p.cut_size for p in perceptors]
         self.cutn = cutn
         self.noise_fac = noise_fac
-        self.augs = cutouts_augs.pytti_classic()
+        # the aug stack follows the sampler choice: "batched" is the
+        # sync-free composed-warp stack, "classic" the 2021 kornia one
+        self.augs = (
+            cutouts_augs.pytti_batched()
+            if cutout_sampler == "batched"
+            else cutouts_augs.pytti_classic()
+        )
         self.input_axes = ("n", "s", "y", "x")
         self.output_axes = ("c", "n", "i")
         self.perceptors = perceptors
@@ -134,9 +140,16 @@ class HDMultiClipEmbedder(nn.Module):
                 (paddingx, paddingx, paddingy, paddingy),
                 mode=PADDING_MODES[self.border_mode],
             )
+        # perceptors with the same input resolution share one cutout batch
+        # (sampling + augs + noise cost once instead of per tower); each
+        # still applies its own normalization stats (SigLIP != CLIP)
+        cutout_cache: dict[int, tuple] = {}
         for cut_size, perceptor in zip(self.cut_sizes, perceptors, strict=True):
-            cutouts, offsets, sizes = self.make_cutouts(input, side_x, side_y, cut_size)
-            # each perceptor owns its normalization stats (SigLIP != CLIP)
+            if cut_size not in cutout_cache:
+                cutout_cache[cut_size] = self.make_cutouts(
+                    input, side_x, side_y, cut_size
+                )
+            cutouts, offsets, sizes = cutout_cache[cut_size]
             clip_in = perceptor.normalize(cutouts)
             image_embeds.append(perceptor.encode_image(clip_in).float().unsqueeze(0))
             all_offsets.append(offsets)
