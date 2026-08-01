@@ -232,9 +232,13 @@ class ConfigSchema:
 
     # mlx = run the CLIP towers + prompt-loss reduction on MLX (Apple Metal,
     # fp16; macOS only, classic ViT towers only — docs/mlx-port-plan.md M1).
+    # mlx_full = run the ENTIRE still-image step on MLX (M2): still mode,
+    # Limited/Unlimited Palette, batched|smart sampler, plain adam, no
+    # semantic masks / semantic image prompts / depth — anything else fails
+    # loudly at startup naming the backend that supports it.
     # torch = the reference engine, every tower, every platform.
     perceptor_backend: str = field(
-        default="torch", validator=_choice(["torch", "mlx"])
+        default="torch", validator=_choice(["torch", "mlx", "mlx_full"])
     )
 
     gradient_accumulation_steps: int = 1

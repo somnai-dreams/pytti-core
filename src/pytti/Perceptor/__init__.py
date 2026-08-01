@@ -223,25 +223,26 @@ def load_clip(params, device=None):
         free_clip()
         raise RuntimeError("Please select at least one CLIP model")
 
-    if params.get("perceptor_backend", "torch") == "mlx":
+    backend = params.get("perceptor_backend", "torch")
+    if backend in ("mlx", "mlx_full"):
         # pure planning import — safe everywhere, no mlx
         from pytti.Perceptor.mlx_backend.convert import MLX_VIT_MODELS
 
         unsupported = [k for k in CLIP_MODEL_NAMES if k not in MLX_VIT_MODELS]
         if unsupported:
             raise RuntimeError(
-                f"perceptor_backend=mlx supports only the classic ViT tier "
-                f"{sorted(MLX_VIT_MODELS)} in M1 — no silent mixed engine. "
+                f"perceptor_backend={backend} supports only the classic ViT "
+                f"tier {sorted(MLX_VIT_MODELS)} — no silent mixed engine. "
                 f"Deselect {unsupported} or use perceptor_backend=torch."
             )
         if sys.platform != "darwin":
             raise RuntimeError(
-                "perceptor_backend=mlx requires macOS (MLX is Metal-only); "
-                "use perceptor_backend=torch."
+                f"perceptor_backend={backend} requires macOS (MLX is "
+                "Metal-only); use perceptor_backend=torch."
             )
         logger.info(
-            f"MLX perceptor backend selected: {CLIP_MODEL_NAMES} will run on "
-            "MLX (torch copies still load for text embedding)."
+            f"MLX perceptor backend ({backend}) selected: {CLIP_MODEL_NAMES} "
+            "will run on MLX (torch copies still load for text embedding)."
         )
     if last_names != CLIP_MODEL_NAMES or CLIP_PERCEPTORS is None:
         free_clip()

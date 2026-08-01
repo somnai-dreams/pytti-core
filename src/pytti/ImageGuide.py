@@ -110,22 +110,40 @@ class DirectImageGuide:
             self.optimizer = optimizer
 
         # per-step loss records for the current scene: list of {name: value}
-        # values are detached 0-dim tensors; format at report time only
-        self.loss_history: list[dict[str, torch.Tensor]] = []
+        # values are detached 0-dim scalars (torch tensors, or mx arrays
+        # under perceptor_backend=mlx_full); format at report time only
+        self.loss_history: list[dict] = []
 
         # perceptor_backend=mlx: the semantic losses (CLIP tower fwd+bwd +
         # prompt reduction) run on MLX via the bridge; samplers, augs, image
         # models, and the optimizer stay torch. None = the torch path.
+        # perceptor_backend=mlx_full: the ENTIRE step runs on MLX (M2 —
+        # docs/mlx-m2-seam-map.md); train() delegates to the engine and the
+        # torch optimizer above is never stepped. Both None = the torch path.
         self.mlx_semantic_loss = None
-        if (
-            embedder is not None
-            and params is not None
-            and params.get("perceptor_backend", "torch") == "mlx"
-        ):
+        self.mlx_engine = None
+        backend = (
+            params.get("perceptor_backend", "torch")
+            if params is not None
+            else "torch"
+        )
+        if embedder is not None and backend == "mlx":
             # local import: only the mlx path pays for loading the towers
             from pytti.Perceptor.mlx_backend.bridge import MLXSemanticLoss
 
             self.mlx_semantic_loss = MLXSemanticLoss(embedder)
+        elif embedder is not None and backend == "mlx_full":
+            # local import: mlx is darwin-only, imported lazily
+            from pytti.mlx_engine.engine import MLXStillEngine
+
+            # fails loud at construction on any config the whole-step
+            # engine can't take (animation, VQGAN, classic sampler, ...)
+            self.mlx_engine = MLXStillEngine(
+                image_rep=image_rep,
+                embedder=embedder,
+                params=params,
+                lr=self.lr,
+            )
 
         self.audio_parser = None
         if params is not None:
@@ -184,6 +202,9 @@ class DirectImageGuide:
     def set_optim(self, opt=None):
         if opt is not None:
             self.optimizer = opt
+        elif self.mlx_engine is not None:
+            # same cadence, MLX state: zero Adam moments + step count
+            self.mlx_engine.reset_optimizer()
         else:
             # reset_lr_each_frame lands here once per frame; make_optimizer
             # re-enters train mode for schedule-free optimizers every time
@@ -230,6 +251,23 @@ class DirectImageGuide:
         steps the optimizer
         promts: (ClipPrompt list) list of prompts
         """
+        if self.mlx_engine is not None:
+            # M2 whole-step engine: decode -> cutouts -> towers -> losses ->
+            # Adam all inside one compiled MLX function. Records keep the
+            # torch names; values are lazy mx scalars (float() at reporting
+            # only, preserving the no-mid-step-sync rule below).
+            step_record = self.mlx_engine.train_step(
+                i,
+                prompts,
+                interp_prompts,
+                loss_augs,
+                interp_steps=interp_steps,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+            if save_loss:
+                self.loss_history.append(step_record)
+            return {"TOTAL": step_record["TOTAL"]}
+
         self.optimizer.zero_grad()
         total_loss = None
         # Values stay 0-dim device tensors until a reporting path formats
@@ -344,6 +382,10 @@ class DirectImageGuide:
         with self.optimizer_eval():
             img = self.image_rep
             params = self.params
+            if self.mlx_engine is not None:
+                # params live on MLX between saves: load them into the torch
+                # module so decode/PNG/breath/.bak (and restore) see them
+                self.mlx_engine.write_back(img)
             # NB: computed at call time — hydra chdirs into the run's output
             # directory before the render starts
             outpath = Path.cwd() / "images_out"
