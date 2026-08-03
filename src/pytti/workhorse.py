@@ -143,8 +143,11 @@ def _hydra_main(cfg: DictConfig):
             p.device = str(device)
     logger.debug(f"Using device {device}")
 
-    # literal "off" in yaml interpreted as False
-    if params.animation_mode == False:  # noqa: E712
+    # YAML 1.1 parses a literal `off` as boolean False; hydra then stringifies
+    # it into the str-typed schema field as 'False'. Normalize BOTH forms —
+    # the string form previously slipped through and rode the torch path as a
+    # silent no-op animation mode (exposed by mlx_full's eligibility check).
+    if params.animation_mode in (False, "False", "false"):
         params.animation_mode = "off"
 
     # save_every: 0 means "one frame per animation frame"
