@@ -176,6 +176,10 @@ class MLXStillEngine:
                 )
             loader = load_tower
         perceptors = list(embedder.perceptors)
+        # same-resolution towers share ONE sampler group (the torch
+        # embedder's cut_size sharing); normalization is per-TOWER inside
+        # the step because stats can differ within a group (FARE = CLIP
+        # constants, SigLIP2 = 0.5s, both 224 — see build_step's docstring)
         group_of_size: dict[int, int] = {}
         group_leader: list[int] = []
         batch_index: list[int] = []
@@ -185,28 +189,17 @@ class MLXStillEngine:
                 group_of_size[size] = len(group_leader)
                 group_leader.append(idx)
             batch_index.append(group_of_size[size])
-        for idx, perceptor in enumerate(perceptors):
-            leader = perceptors[group_leader[batch_index[idx]]]
-            same_stats = tuple(leader.normalize.mean) == tuple(
-                perceptor.normalize.mean
-            ) and tuple(leader.normalize.std) == tuple(perceptor.normalize.std)
-            if not same_stats:
-                raise RuntimeError(
-                    f"{perceptor.key} and {leader.key} share a cutout batch "
-                    "(same input resolution) but disagree on normalization "
-                    "stats — a shared batch cannot represent that."
-                )
         self._perceptors = perceptors
         self._towers = tuple(loader(p.key, tower_dtype) for p in perceptors)
         self._batch_index = tuple(batch_index)
         self._group_cut_sizes = tuple(perceptors[i].cut_size for i in group_leader)
-        self._group_means = tuple(
-            mx.array(np.asarray(perceptors[i].normalize.mean, dtype=np.float32))
-            for i in group_leader
+        self._tower_means = tuple(
+            mx.array(np.asarray(p.normalize.mean, dtype=np.float32))
+            for p in perceptors
         )
-        self._group_stds = tuple(
-            mx.array(np.asarray(perceptors[i].normalize.std, dtype=np.float32))
-            for i in group_leader
+        self._tower_stds = tuple(
+            mx.array(np.asarray(p.normalize.std, dtype=np.float32))
+            for p in perceptors
         )
         self._out_dim_max = max(t.config.output_dim for t in self._towers)
 
@@ -281,7 +274,7 @@ class MLXStillEngine:
             raise _reject(
                 f"image model {type(image_rep).__name__} "
                 "(PixelImage/RGBImage only)",
-                "Use perceptor_backend=mlx for VQGAN.",
+                "Use perceptor_backend=mlx for VQGAN, torch for LlamaGen.",
             )
         if embedder.cutout_sampler not in ("batched", "smart"):
             raise _reject(
@@ -436,8 +429,8 @@ class MLXStillEngine:
             towers=self._towers,
             batch_index=self._batch_index,
             group_cut_sizes=self._group_cut_sizes,
-            group_means=self._group_means,
-            group_stds=self._group_stds,
+            tower_means=self._tower_means,
+            tower_stds=self._tower_stds,
             cutter=cutter,
         )
         self._step_key = key
@@ -455,12 +448,23 @@ class MLXStillEngine:
         *,
         interp_steps: int = 0,
         gradient_accumulation_steps: int = 1,
+        palette_gate: float = 1.0,
     ) -> dict:
         """
         One optimizer step — ``DirectImageGuide.train``'s contract: returns
         the step record ``{name: 0-dim scalar, ..., "TOTAL": total}`` with
         the EXACT torch record names, values lazy until reporting.
+
+        ``palette_gate`` is phase scheduling's Limited Palette lock as a
+        per-step host argument: 1.0 = palette trains, 0.0 = its gradient
+        and update are gated off in-step (never a retrace). The guide
+        computes it from the schedule table (pytti/phase_scheduling.py).
         """
+        if palette_gate not in (0.0, 1.0):
+            raise ValueError(
+                f"palette_gate must be 0.0 or 1.0, got {palette_gate!r} — "
+                "it is phase scheduling's lock gate, not a soft weight"
+            )
         t = i / interp_steps if i < interp_steps else 1.0
 
         active_augs = [
@@ -484,7 +488,12 @@ class MLXStillEngine:
         def host_vector(values) -> mx.array:
             return mx.array(np.asarray(values, dtype=np.float32))
 
-        aug_w = host_vector([parametric_eval(a.weight) for a in active_augs])
+        # weight_scale is the phase-scheduling multiplier the guide sets on
+        # the Loss objects (1.0 when off) — folded into the evaluated
+        # weight exactly like torch Loss.forward does
+        aug_w = host_vector(
+            [parametric_eval(a.weight) * a.weight_scale for a in active_augs]
+        )
         aug_s = host_vector([parametric_eval(a.stop) for a in active_augs])
         p_w, p_s, p_thresh, p_scale = [], [], [], []
         for prompt, recorded in active_prompts:
@@ -501,6 +510,7 @@ class MLXStillEngine:
             host_vector(p_s),
             host_vector(p_thresh),
             host_vector(p_scale),
+            mx.array(np.float32(palette_gate)),
         )
         # one dispatch per step: materialize the new params/moments/records
         # (the MLX execution cadence — this is not a torch-style mid-graph

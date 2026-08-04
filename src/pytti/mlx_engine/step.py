@@ -307,8 +307,8 @@ def build_step(
     towers: tuple,
     batch_index: tuple,
     group_cut_sizes: tuple,
-    group_means: tuple,
-    group_stds: tuple,
+    tower_means: tuple,
+    tower_stds: tuple,
     cutter=None,
 ):
     """
@@ -316,27 +316,41 @@ def build_step(
     ``opt`` state (both mutated in place per call; ``opt`` must already be
     ``init``'d on the trainable keys).
 
-    ``towers[c]`` is perceptor ``c``'s M1 ``VisionTower``; ``batch_index[c]``
-    maps it to its cut-size group; ``group_cut_sizes``/``group_means``/
-    ``group_stds`` are per-group (leader) input resolution + CLIP
-    normalization stats (``[3]`` fp32). ``cutter`` defaults to
+    ``towers[c]`` is perceptor ``c``'s M1 tower; ``batch_index[c]`` maps it
+    to its cut-size group (same-resolution towers share ONE sampler draw,
+    exactly like the torch embedder shares cutout tensors by cut_size);
+    ``group_cut_sizes`` is the per-group input resolution.
+    ``tower_means``/``tower_stds`` are per-TOWER normalization stats
+    (``[3]`` fp32) — per-tower rather than per-group because a mixed
+    ensemble can share a resolution but not stats (FARE = CLIP constants,
+    SigLIP2 = 0.5s, both 224): each tower normalizes its group's shared raw
+    cutouts with its own stats, mirroring the torch path's per-perceptor
+    ``normalize`` (Embedder.forward). ``cutter`` defaults to
     :func:`make_cutter`; tests inject a deterministic one.
 
-    Returns ``step(aug_w, aug_s, p_w, p_s, p_thresh, p_scale) -> (total,
-    aug_raws, image_raws, prompt_raws)``:
+    Returns ``step(aug_w, aug_s, p_w, p_s, p_thresh, p_scale,
+    palette_gate) -> (total, aug_raws, image_raws, prompt_raws)``:
 
     - ``aug_w``/``aug_s``: ``[A]`` fp32 — parametric-eval'd weight/stop per
-      active direct loss;
+      active direct loss (``aug_w`` includes the phase-scheduling
+      ``weight_scale``, folded host-side by the engine);
     - ``p_w``/``p_s``/``p_thresh``/``p_scale``: ``[P]`` fp32 — per active
       prompt: weight, stop, mask cutoff, interp scale (t or 1-t);
+    - ``palette_gate``: 0-dim fp32, 1.0 or 0.0 — phase scheduling's
+      Limited Palette lock. It multiplies BOTH the palette gradient (so
+      Adam's moments stop accumulating, matching torch's lock where the
+      palette leaves the graph) and the palette's applied update (a
+      per-param lr gate, so residual momentum cannot drift the palette
+      after the lock). Unused for rgb images. Arg-driven by design: the
+      lock can never be a graph-structure change / retrace;
     - ``total``: 0-dim — the torch step's TOTAL (sum over microbatches);
     - ``*_raws``: ``[A]`` / ``[len(image_loss_names)]`` / ``[P]`` raw loss
       records (last microbatch's, matching train()'s per-mb overwrite).
     """
     trainable = trainable_keys_for(cfg.image_kind)
     n_groups = len(group_cut_sizes)
-    if not (len(group_means) == len(group_stds) == n_groups):
-        raise ValueError("group stats and cut sizes must align")
+    if not (len(tower_means) == len(tower_stds) == len(towers)):
+        raise ValueError("tower stats must align with towers (one per tower)")
     if len(towers) != len(batch_index):
         raise ValueError("one batch_index entry per tower")
     if any(not 0 <= b < n_groups for b in batch_index):
@@ -401,15 +415,14 @@ def build_step(
             z_nhwc, cfg.side_x, cfg.side_y, cfg.padding, cfg.border_mode
         )
         groups = [cutter(padded, cut_size) for cut_size in group_cut_sizes]
-        normed = [
-            (cutouts - mean) / std
-            for (cutouts, _, _), mean, std in zip(
-                groups, group_means, group_stds, strict=True
-            )
-        ]
         embs = []
-        for tower, b in zip(towers, batch_index, strict=True):
-            e = tower.encode(normed[b]).astype(mx.float32)  # [n, d_c]
+        for tower, b, mean, std in zip(
+            towers, batch_index, tower_means, tower_stds, strict=True
+        ):
+            # per-TOWER normalize over the group's shared raw cutouts
+            # (stats can differ within a resolution group — see build_step)
+            e = tower.encode((groups[b][0] - mean) / std)
+            e = e.astype(mx.float32)  # [n, d_c]
             pad = out_dim_max - e.shape[-1]
             if pad:
                 e = mx.pad(e, ((0, 0), (0, pad)))
@@ -461,12 +474,23 @@ def build_step(
 
     grad_fn = mx.value_and_grad(loss_fn)
 
-    def step(aug_w, aug_s, p_w, p_s, p_thresh, p_scale):
+    def step(aug_w, aug_s, p_w, p_s, p_thresh, p_scale, palette_gate):
         tree = {key: params[key] for key in trainable}
         (total, (aug_raws, image_raws, prompt_raws)), grads = grad_fn(
             tree, aug_w, aug_s, p_w, p_s, p_thresh, p_scale
         )
-        params.update(opt.apply_gradients(grads, tree))
+        if cfg.image_kind == "pixel":
+            # phase-scheduling palette lock (see build_step docstring):
+            # gate the gradient AND the applied update — palette exactly
+            # frozen at gate 0, bit-identical step at gate 1 (mul by the
+            # 0/1 gate is exact; the select keeps the open path untouched)
+            grads["palette"] = grads["palette"] * palette_gate
+        new_tree = opt.apply_gradients(grads, tree)
+        if cfg.image_kind == "pixel":
+            new_tree["palette"] = mx.where(
+                palette_gate > 0.5, new_tree["palette"], tree["palette"]
+            )
+        params.update(new_tree)
         params.update(update_fn(params))  # step THEN clamp (ImageGuide:317-318)
         return total, aug_raws, image_raws, prompt_raws
 

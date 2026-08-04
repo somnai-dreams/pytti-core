@@ -201,11 +201,16 @@ class StubNormalize:
     std = CLIP_STD
 
 
+class StubSigLIPNormalize:
+    mean = (0.5, 0.5, 0.5)
+    std = (0.5, 0.5, 0.5)
+
+
 class StubPerceptor:
-    def __init__(self, key, cut_size):
+    def __init__(self, key, cut_size, normalize=None):
         self.key = key
         self.cut_size = cut_size
-        self.normalize = StubNormalize()
+        self.normalize = normalize if normalize is not None else StubNormalize()
 
 
 class StubEmbedder:
@@ -237,6 +242,12 @@ def _stub_loader(key, dtype):
         ),
         "T16": ViTConfig(
             image_size=16, patch_size=8, hidden_dim=32,
+            num_layers=2, num_heads=4, mlp_dim=64, output_dim=24,
+        ),
+        # same input resolution as T32 but a different embedding width —
+        # the FARE + SigLIP2 ensemble shape in miniature
+        "T32B": ViTConfig(
+            image_size=32, patch_size=8, hidden_dim=32,
             num_layers=2, num_heads=4, mlp_dim=64, output_dim=24,
         ),
     }
@@ -463,6 +474,32 @@ class TestEngineAssembly:
             "smoothing loss (TV)", "a test prompt", "left side", "TOTAL",
         ]
         assert all(math.isfinite(float(r["TOTAL"])) for r in records)
+
+    def test_mixed_stats_ensemble_shares_sampler_group(self):
+        """The FARE + SigLIP2 ensemble shape: same input resolution,
+        DIFFERENT normalization stats, different embedding widths. The
+        towers must share ONE sampler group (torch's cut_size sharing) with
+        per-tower stats flowing into the step, and the padded spherical
+        reduction must descend."""
+        embedder = StubEmbedder()
+        embedder.perceptors = [
+            StubPerceptor("T32", 32),
+            StubPerceptor("T32B", 32, normalize=StubSigLIPNormalize()),
+        ]
+        engine = _make_engine(embedder=embedder)
+        assert engine._group_cut_sizes == (32,)  # one shared sampler draw
+        assert engine._batch_index == (0, 0)
+        assert engine._out_dim_max == 24  # 16-d padded up to 24-d
+        for got, perceptor in zip(
+            engine._tower_means, embedder.perceptors, strict=True
+        ):
+            assert np.allclose(
+                np.array(got), np.asarray(perceptor.normalize.mean)
+            ), perceptor.key
+        records = self._run(engine, steps=5)
+        totals = [float(r["TOTAL"]) for r in records]
+        assert all(math.isfinite(v) for v in totals)
+        assert min(totals[1:]) < totals[0]
 
     def test_direct_image_guide_dispatch(self, monkeypatch):
         """train()/set_optim()/loss-history plumbing through the real

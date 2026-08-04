@@ -293,6 +293,50 @@ def test_bridge_function_round_trip_and_backward():
     assert torch.allclose(x.grad, 4.0 * x.detach(), rtol=1e-6, atol=1e-7)
 
 
+@needs_mlx
+def test_bridge_groups_by_resolution_and_stats(monkeypatch):
+    """A mixed ensemble at ONE resolution with DIFFERENT normalization stats
+    (FARE = CLIP stats, SigLIP2 = 0.5s, both 224) must form one crossing per
+    stats group over the shared raw cutouts — the torch path's per-perceptor
+    normalize — not refuse. Same-resolution same-stats towers keep sharing."""
+    import types
+
+    import pytti.Perceptor.mlx_backend.bridge as bridge_module
+    import pytti.Perceptor.mlx_backend.convert as convert_module
+    from pytti.Perceptor.mlx_backend.bridge import MLXSemanticLoss
+
+    CLIP_STATS = ((0.48, 0.46, 0.41), (0.27, 0.26, 0.28))
+    SIGLIP_STATS = ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+
+    def perceptor(key, cut_size, stats):
+        return types.SimpleNamespace(
+            key=key,
+            cut_size=cut_size,
+            normalize=types.SimpleNamespace(mean=stats[0], std=stats[1]),
+        )
+
+    dims = {"A512": 512, "B768": 768, "C512": 512, "D512": 512}
+    monkeypatch.setattr(bridge_module, "MLX_VIT_MODELS", dims)
+    monkeypatch.setattr(
+        convert_module,
+        "load_tower",
+        lambda key, dtype: types.SimpleNamespace(
+            config=types.SimpleNamespace(output_dim=dims[key])
+        ),
+    )
+    embedder = types.SimpleNamespace(
+        perceptors=[
+            perceptor("A512", 224, CLIP_STATS),  # group 0
+            perceptor("B768", 224, SIGLIP_STATS),  # same size, new stats -> 1
+            perceptor("C512", 224, CLIP_STATS),  # shares group 0
+            perceptor("D512", 96, CLIP_STATS),  # new size -> group 2
+        ]
+    )
+    bridge = MLXSemanticLoss(embedder)
+    assert bridge._group_leader == [0, 1, 3]
+    assert bridge._out_dim_max == 768
+
+
 # ---------------------------------------------------------------------------
 # full path against a real tower (plan gate 3, fp16 tolerance)
 # ---------------------------------------------------------------------------

@@ -287,29 +287,26 @@ class MLXSemanticLoss:
         self.embedder = embedder
         self._perceptors = perceptors
 
-        # towers with the same input resolution share one cutout batch (the
-        # Embedder shares them by cut_size) — group them so each batch
-        # crosses the boundary once
-        group_of_size: dict[int, int] = {}
+        # The embedder shares RAW cutout tensors by cut_size (same cuts for
+        # every tower at that resolution); the bridge groups crossings by
+        # (resolution, normalization stats) so each group crosses the
+        # boundary once, normalized for its towers. A mixed-stats ensemble
+        # at one resolution — FARE (CLIP stats) + SigLIP2 (0.5s), both 224 —
+        # crosses as two normalized copies of the SAME raw cutouts, exactly
+        # the torch path's per-perceptor normalize (Embedder.forward).
+        group_of_key: dict[tuple, int] = {}
         self._group_leader: list[int] = []  # perceptor index per batch group
         batch_index: list[int] = []  # perceptor -> batch group
         for idx, perceptor in enumerate(perceptors):
-            size = perceptor.cut_size
-            if size not in group_of_size:
-                group_of_size[size] = len(self._group_leader)
+            key = (
+                perceptor.cut_size,
+                tuple(perceptor.normalize.mean),
+                tuple(perceptor.normalize.std),
+            )
+            if key not in group_of_key:
+                group_of_key[key] = len(self._group_leader)
                 self._group_leader.append(idx)
-            batch_index.append(group_of_size[size])
-        for idx, perceptor in enumerate(perceptors):
-            leader = perceptors[self._group_leader[batch_index[idx]]]
-            same_stats = tuple(leader.normalize.mean) == tuple(
-                perceptor.normalize.mean
-            ) and tuple(leader.normalize.std) == tuple(perceptor.normalize.std)
-            if not same_stats:
-                raise RuntimeError(
-                    f"{perceptor.key} and {leader.key} share a cutout batch "
-                    "(same input resolution) but disagree on normalization "
-                    "stats — the shared-batch bridge cannot represent that."
-                )
+            batch_index.append(group_of_key[key])
 
         self._towers = [load_tower(p.key, dtype) for p in perceptors]
         self._out_dim_max = max(t.config.output_dim for t in self._towers)

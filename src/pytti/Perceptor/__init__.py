@@ -231,8 +231,8 @@ def load_clip(params, device=None):
         unsupported = [k for k in CLIP_MODEL_NAMES if k not in MLX_VIT_MODELS]
         if unsupported:
             raise RuntimeError(
-                f"perceptor_backend={backend} supports only the classic ViT "
-                f"tier {sorted(MLX_VIT_MODELS)} — no silent mixed engine. "
+                f"perceptor_backend={backend} supports only "
+                f"{sorted(MLX_VIT_MODELS)} — no silent mixed engine. "
                 f"Deselect {unsupported} or use perceptor_backend=torch."
             )
         if sys.platform != "darwin":

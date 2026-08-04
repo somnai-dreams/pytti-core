@@ -3,11 +3,13 @@ CLIP visual tower (OpenAI ViT architecture) in mlx.nn.
 
 Architecture, matching the OpenAI checkpoints exactly: patch conv (no bias),
 class token + learned position embedding, pre-LN transformer blocks
-(`mx.fast.scaled_dot_product_attention` + `mx.fast.layer_norm`), QuickGELU
-MLP (``x * sigmoid(1.702 x)``), final LN on the class token + linear
+(`mx.fast.scaled_dot_product_attention` + `mx.fast.layer_norm`), MLP with
+the checkpoint's activation (``ViTConfig.activation``: QuickGELU
+``x * sigmoid(1.702 x)`` for the OpenAI tier, exact erf-GELU for the
+open_clip laion/FARE lineage), final LN on the class token + linear
 projection. The q/k/v projections are fused into one matmul (the converter
-row-concatenates the HF weights); this is numerically identical to separate
-projections.
+row-concatenates the HF weights; open_clip checkpoints ship them pre-fused);
+this is numerically identical to separate projections.
 
 Input contract (the bridge boundary)
 ------------------------------------
@@ -42,6 +44,14 @@ from pytti.Perceptor.mlx_backend import ViTConfig
 
 def quick_gelu(x: mx.array) -> mx.array:
     return x * mx.sigmoid(1.702 * x)
+
+
+# ViTConfig.activation -> callable. ``nn.gelu`` is the exact erf form
+# (x * (1 + erf(x / sqrt 2)) / 2) — parity with torch
+# ``nn.GELU(approximate='none')`` measured at 6e-7 max abs diff over
+# [-6, 6] fp32 (mlx 0.32). Do NOT swap in gelu_approx/gelu_fast_approx:
+# those are the tanh/sigmoid approximations, a different function.
+_ACTIVATIONS = {"quickgelu": quick_gelu, "gelu": nn.gelu}
 
 
 class LayerNorm(nn.Module):
@@ -87,13 +97,16 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dims: int, hidden_dims: int):
+    def __init__(self, dims: int, hidden_dims: int, activation: str):
         super().__init__()
         self.fc1 = nn.Linear(dims, hidden_dims, bias=True)
         self.fc2 = nn.Linear(hidden_dims, dims, bias=True)
+        # KeyError here is unreachable through ViTConfig (validated at
+        # construction) but still loud for any direct caller
+        self._act = _ACTIVATIONS[activation]
 
     def __call__(self, x: mx.array) -> mx.array:
-        return self.fc2(quick_gelu(self.fc1(x)))
+        return self.fc2(self._act(self.fc1(x)))
 
 
 class ResidualAttentionBlock(nn.Module):
@@ -104,7 +117,7 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_1 = LayerNorm(config.hidden_dim, config.layer_norm_eps, ln_fp32)
         self.attn = Attention(config.hidden_dim, config.num_heads)
         self.ln_2 = LayerNorm(config.hidden_dim, config.layer_norm_eps, ln_fp32)
-        self.mlp = MLP(config.hidden_dim, config.mlp_dim)
+        self.mlp = MLP(config.hidden_dim, config.mlp_dim, config.activation)
 
     def __call__(self, x: mx.array) -> mx.array:
         x = x + self.attn(self.ln_1(x))
