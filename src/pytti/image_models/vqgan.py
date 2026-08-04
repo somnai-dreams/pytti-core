@@ -123,7 +123,20 @@ def load_vqgan_model(config_path, checkpoint_path):
     return model, gumbel
 
 
-def vector_quantize(x, codebook, fake_grad=True):
+def vector_quantize(x, codebook, fake_grad=True, l2_norm=False):
+    """
+    Snap each row of x to its nearest codebook row, with a straight-through
+    gradient (replace_grad) back to x.
+
+    l2_norm=True is the LlamaGen codebook convention: rows of x AND the
+    codebook are L2-normalized before the distance matrix, quantized values
+    are the normalized codebook rows, and the straight-through gradient flows
+    through F.normalize into the raw latent (matching upstream
+    VectorQuantizer.forward, vendor/llamagen/vq_model.py).
+    """
+    if l2_norm:
+        x = F.normalize(x, dim=-1)
+        codebook = F.normalize(codebook, dim=-1)
     d = (
         x.pow(2).sum(dim=-1, keepdim=True)
         + codebook.pow(2).sum(dim=1)

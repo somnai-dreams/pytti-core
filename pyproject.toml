@@ -34,6 +34,8 @@ dependencies = [
     "schedulefree>=1.4.1",
     # SigLIP2 tokenizer (open_clip's HFTokenizer imports it lazily)
     "transformers>=5",
+    # revision-pinned checkpoint downloads (LlamaGen VQ, MLX tower weights)
+    "huggingface_hub>=0.20",
     # MLX perceptor backend (docs/mlx-port-plan.md) — imported lazily inside
     # pytti.Perceptor.mlx_backend only, so linux never touches it
     "mlx>=0.32; sys_platform == 'darwin'",
