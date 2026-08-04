@@ -1,0 +1,23 @@
+# @package _global_
+# Trivially-convergent still render for the auto_stop live smoke: a strong
+# init-image hold (direct_init_weight 10) starts AT its target, so the TOTAL
+# loss plateaus almost immediately and the scene should stop far before the
+# steps_per_scene cap. init_image is passed as an override by the test.
+scenes: a photograph
+image_model: Unlimited Palette
+width: 128
+height: 128
+steps_per_scene: 150
+steps_per_frame: 25
+pre_animation_steps: 0
+save_every: 10
+display_every: 50
+backups: 1
+seed: 12345
+cutouts: 8
+ViTB32: true
+perceptor_backend: mlx_full
+direct_init_weight: "10"
+auto_stop: true
+auto_stop_threshold: 0.01
+file_namespace: auto_stop_smoke

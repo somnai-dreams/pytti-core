@@ -19,6 +19,14 @@ from pytti import (
 )
 from pytti.AudioParse import SpectralAudioParser
 from pytti.image_models.differentiable_image import DifferentiableImage
+from pytti.image_models.pixel import PixelImage
+from pytti.LossAug.TVLossClass import TVLoss
+from pytti.phase_scheduling import (
+    init_weight_scale,
+    palette_locked,
+    scene_t_hat,
+    tv_weight_scale,
+)
 from pytti.rotoscoper import update_rotoscopers
 from pytti.Transforms import animate_video_source, zoom_2d, zoom_3d
 
@@ -26,6 +34,47 @@ from pytti.Transforms import animate_video_source, zoom_2d, zoom_3d
 def frame_filename(base_name: str, n: int) -> str:
     """Zero-padded frame name: sorts correctly and feeds ffmpeg %04d."""
     return f"{base_name}_{n:04d}.png"
+
+
+# auto_stop: steps between TOTAL-loss samples. Each sample is one float()
+# host sync; every 10 steps it amortizes to nothing (the per-step hot path
+# stays sync-free — see the comment in DirectImageGuide.train).
+AUTO_STOP_CHECK_INTERVAL = 10
+
+
+def plateau_improvement(samples, window_samples: int) -> float | None:
+    """
+    Relative improvement of a loss series over its trailing window.
+
+    Pure function — the whole convergence decision lives here so it is
+    testable against synthetic loss sequences without a render.
+
+    samples: TOTAL-loss samples, oldest first (one per check interval).
+    window_samples: trailing window length in samples; must be >= 2.
+
+    Returns None until one full window of samples exists (a partial window
+    is never judged). Otherwise the trailing window is split in half and
+
+        improvement = (mean(older half) - mean(newer half))
+                      / max(|mean(older half)|, 1e-8)
+
+    Positive = still improving; near zero or negative = plateaued (or
+    regressing — either way, no longer converging). The half-means make the
+    verdict robust to per-sample noise from the stochastic cutouts.
+    """
+    if window_samples < 2:
+        raise ValueError(
+            "window_samples must be >= 2 to measure improvement, "
+            f"got {window_samples}"
+        )
+    if len(samples) < window_samples:
+        return None
+    window = list(samples[-window_samples:])
+    half = window_samples // 2
+    older, newer = window[:half], window[half:]
+    older_mean = sum(older) / len(older)
+    newer_mean = sum(newer) / len(newer)
+    return (older_mean - newer_mean) / max(abs(older_mean), 1e-8)
 
 
 def make_optimizer(params_iterable, config_optimizer: str, lr, **optimizer_params):
@@ -88,11 +137,46 @@ class DirectImageGuide:
         semantic_init_prompt=None,
         init_augs=None,
         init_image_pil=None,
+        output_size=None,
         **optimizer_params,
     ):
         self.image_rep = image_rep
         self.embedder = embedder
         self.params = params
+
+        # coarse_to_fine stage 1: saved PNG frames are upscaled to the final
+        # canvas (width, height) so the numbered frame sequence stays uniform
+        # in size across the stage boundary. None = save at native dims.
+        # .bak backups always stay at native dims (they are the state dict).
+        self.output_size = tuple(output_size) if output_size is not None else None
+
+        # phase scheduling: fixed quality-phase schedules over normalized
+        # scene time t_hat = step/steps_per_scene (the table lives in
+        # pytti/phase_scheduling.py; applied per step in train())
+        self.phase_scheduling = params is not None and bool(
+            params.get("phase_scheduling", False)
+        )
+        if self.phase_scheduling and params.animation_mode != "off":
+            raise ValueError(
+                "phase_scheduling schedules quality phases over normalized "
+                "scene time (t_hat = step / steps_per_scene); "
+                f"animation_mode={params.animation_mode!r} re-anchors the "
+                "image every frame, so scene-time schedules have no defined "
+                "meaning there (animation semantics deferred). Set "
+                "animation_mode: off or phase_scheduling: false."
+            )
+        if (
+            params is not None
+            and bool(params.get("auto_stop", False))
+            and params.animation_mode != "off"
+        ):
+            raise ValueError(
+                "auto_stop judges loss plateaus over a scene; animation "
+                f"warps (animation_mode={params.animation_mode!r}) perturb "
+                "the loss every frame, so a plateau verdict has no defined "
+                "meaning there. Set animation_mode: off or auto_stop: false."
+            )
+
         if lr is None:
             lr = image_rep.lr
         self.lr = lr
@@ -145,6 +229,22 @@ class DirectImageGuide:
                 lr=self.lr,
             )
 
+        # phase-scheduling palette lock state. The torch and mlx-bridge
+        # paths lock via PixelImage.lock_palette (the exact mechanism the
+        # lock_palette config uses: decode reads the sorted snapshot, the
+        # live palette leaves the graph); mlx_full gates the palette
+        # gradient + update in-step via a per-step 0/1 host argument
+        # instead, so the lock is never a compiled-graph structure change.
+        # A palette already locked by config (lock_palette/target_palette
+        # set use_palette_target before the guide is built) is left alone.
+        self._phase_palette_locked = False
+        self._phase_manages_palette = (
+            self.phase_scheduling
+            and self.mlx_engine is None
+            and isinstance(image_rep, PixelImage)
+            and not image_rep.use_palette_target
+        )
+
         self.audio_parser = None
         if params is not None:
             if params.input_audio and params.input_audio_filters:
@@ -180,8 +280,38 @@ class DirectImageGuide:
         runs the optimizer
         prompts: (ClipPrompt list) list of prompts
         n_steps: (positive integer) steps to run
-        returns: the number of steps run
+        returns: the steps this scene counts for against the caller's global
+                 step counter: n_steps when the scene ran to its cap OR
+                 auto_stop converged it early (the counter stays
+                 scene-aligned either way, so later scenes' frame numbering
+                 and save slots match a full-length run), i + 1 when the
+                 legacy `stop` loss threshold broke the loop.
+
+        auto_stop (self.params): plateau detection on the TOTAL loss. The
+        sample window is local to this call, and this method runs once per
+        scene (workhorse.py's scene loop), so multi-scene runs reset the
+        window at every scene boundary by construction. Sampling starts
+        after the interpolation ramp — a scene never stops mid-crossfade.
         """
+        params = self.params
+        auto_stop = params is not None and bool(params.get("auto_stop", False))
+        if auto_stop:
+            window_steps = int(params.get("auto_stop_window", 50))
+            threshold = float(params.get("auto_stop_threshold", 0.002))
+            if window_steps < 2 * AUTO_STOP_CHECK_INTERVAL:
+                raise ValueError(
+                    f"auto_stop_window={window_steps} is too short: the loss "
+                    f"is sampled every {AUTO_STOP_CHECK_INTERVAL} steps and "
+                    "the plateau detector needs at least two samples — use "
+                    f"auto_stop_window >= {2 * AUTO_STOP_CHECK_INTERVAL}"
+                )
+            if not math.isfinite(threshold):
+                raise ValueError(
+                    f"auto_stop_threshold={threshold!r} must be finite"
+                )
+            window_samples = window_steps // AUTO_STOP_CHECK_INTERVAL
+            total_samples: list[float] = []
+
         steps_run = 0
         for i in tqdm(range(n_steps)):
             self.update(i + i_offset, i + skipped_steps)
@@ -194,9 +324,31 @@ class DirectImageGuide:
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
             steps_run = i + 1
-            # only pay the device sync when an early-stop is actually set
-            if stop != -math.inf and float(losses["TOTAL"]) <= stop:
+            # float(TOTAL) is a device sync; it is only paid when the legacy
+            # early-stop is set (per step) or at an auto_stop sample point
+            # (once per AUTO_STOP_CHECK_INTERVAL steps, past the interp ramp)
+            sample_now = (
+                auto_stop
+                and i + skipped_steps >= interp_steps
+                and (i + 1) % AUTO_STOP_CHECK_INTERVAL == 0
+            )
+            if stop == -math.inf and not sample_now:
+                continue
+            total = float(losses["TOTAL"])
+            if stop != -math.inf and total <= stop:
                 break
+            if sample_now:
+                total_samples.append(total)
+                improvement = plateau_improvement(total_samples, window_samples)
+                if improvement is not None and improvement < threshold:
+                    logger.info(
+                        f"auto_stop: converged at step {i + i_offset + 1} "
+                        f"(of cap {i_offset + n_steps}) — relative TOTAL-loss "
+                        f"improvement {improvement:.6f} < {threshold} over "
+                        f"the trailing {window_steps} steps; stopping scene."
+                    )
+                    self._save_final_frame(i + i_offset, i_offset + n_steps)
+                    return n_steps
         return steps_run
 
     def set_optim(self, opt=None):
@@ -237,6 +389,45 @@ class DirectImageGuide:
     def clear_loss_history(self):
         self.loss_history = []
 
+    def _apply_phase_schedule(self, i, loss_augs) -> float:
+        """
+        Apply the phase_scheduling table (pytti/phase_scheduling.py) for
+        scene-local step ``i``:
+
+        - sets ``weight_scale`` on the smoothing (TV) loss and on the
+          direct init-hold losses (``self.init_augs``) — both backends read
+          it when evaluating the configured weight;
+        - manages the Limited Palette lock for the final third of the
+          scene: the torch/mlx-bridge paths flip ``PixelImage.lock_palette``
+          at the transition; mlx_full instead consumes the returned gate.
+
+        Returns the palette gate: 1.0 (open) or 0.0 (locked), passed to the
+        mlx_full engine as a per-step host argument. run_steps passes
+        ``i + skipped_steps`` and workhorse runs one scene per run_steps
+        call, so ``i`` traverses [0, steps_per_scene) within every scene
+        and the schedules reset at each scene boundary by construction.
+        """
+        t_hat = scene_t_hat(i, self.params.steps_per_scene)
+        tv_scale = tv_weight_scale(t_hat)
+        for aug in loss_augs:
+            if isinstance(aug, TVLoss):
+                aug.weight_scale = tv_scale
+        init_scale = init_weight_scale(t_hat)
+        for aug in self.init_augs or ():
+            aug.weight_scale = init_scale
+        locked = palette_locked(t_hat)
+        if locked != self._phase_palette_locked:
+            if self._phase_manages_palette:
+                self.image_rep.lock_palette(locked)
+            if isinstance(self.image_rep, PixelImage):
+                logger.info(
+                    "phase_scheduling: palette "
+                    f"{'locked' if locked else 'unlocked'} at scene step {i} "
+                    f"(t_hat {t_hat:.3f})"
+                )
+            self._phase_palette_locked = locked
+        return 0.0 if locked else 1.0
+
     def train(
         self,
         i,
@@ -251,6 +442,12 @@ class DirectImageGuide:
         steps the optimizer
         promts: (ClipPrompt list) list of prompts
         """
+        # phase scheduling runs first so BOTH backends see the same per-step
+        # weight scales / palette gate (i is the scene-local step here)
+        palette_gate = 1.0
+        if self.phase_scheduling:
+            palette_gate = self._apply_phase_schedule(i, loss_augs)
+
         if self.mlx_engine is not None:
             # M2 whole-step engine: decode -> cutouts -> towers -> losses ->
             # Adam all inside one compiled MLX function. Records keep the
@@ -263,6 +460,7 @@ class DirectImageGuide:
                 loss_augs,
                 interp_steps=interp_steps,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+                palette_gate=palette_gate,
             )
             if save_loss:
                 self.loss_history.append(step_record)
@@ -375,6 +573,18 @@ class DirectImageGuide:
             logger.debug("VRAM Usage:")
             print_vram_usage()
 
+    def decode_output_image(self):
+        """
+        Decode the current image as an OUTPUT image (PIL, native dims) with
+        the same state discipline as _save_frame: the Polyak-averaged (eval)
+        iterate under adamw_sf, and the live MLX params under mlx_full.
+        coarse_to_fine's stage transition decodes through here.
+        """
+        with self.optimizer_eval():
+            if self.mlx_engine is not None:
+                self.mlx_engine.write_back(self.image_rep)
+            return self.image_rep.decode_image()
+
     def _save_frame(self, i):
         # The ONE save path: everything decoded/serialized here must see the
         # averaged (eval) iterate under adamw_sf — the .bak included, so a
@@ -390,6 +600,10 @@ class DirectImageGuide:
             # directory before the render starts
             outpath = Path.cwd() / "images_out"
             im = img.decode_image()
+            if self.output_size is not None and im.size != self.output_size:
+                # coarse_to_fine stage 1: frames land on disk at the final
+                # canvas size (the .bak below keeps native dims)
+                im = im.resize(self.output_size, Image.BICUBIC)
             n = (i + 1) // params.save_every
 
             if params.breath_mode and self.init_image_pil is not None:
@@ -421,6 +635,35 @@ class DirectImageGuide:
                     )
                     if stale.exists():
                         stale.unlink()
+
+    def _save_final_frame(self, i, scene_end):
+        """
+        Persist the converged state when auto_stop ends a scene early.
+
+        update() saves BEFORE train(), so the newest frame on disk always
+        predates the stop step's state. Save into the next save_every slot of
+        this scene — or re-save the scene's last slot when the stop landed
+        after it — so frame numbering matches a full-length run and a later
+        scene's saves can never land on top of the converged frame.
+        _save_frame handles optimizer_eval (adamw_sf) and the mlx_full
+        write-back, so the frame and its .bak both hold the final state.
+
+        i: the global step index the scene stopped at (0-based).
+        scene_end: the global step index just past the scene's cap.
+        """
+        params = self.params
+        if params.save_every <= 0:
+            return
+        # slots already written by update(): every n with n*save_every-1 <= i
+        n_fired = (i + 1) // params.save_every
+        # last slot a full-length scene would write
+        n_scene_last = scene_end // params.save_every
+        n_final = min(n_fired + 1, n_scene_last)
+        if n_final < 1:
+            # the scene is shorter than one save interval: a full-length run
+            # would not have saved a frame either
+            return
+        self._save_frame(n_final * params.save_every - 1)
 
     def update(self, i, stage_i):
         """

@@ -11,7 +11,11 @@ from attrs import define, field
 from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING
 
-from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
+from pytti.config.model_names import (
+    LLAMAGEN_MODEL_NAMES,
+    VQGAN_MODEL_ALIASES,
+    VQGAN_MODEL_NAMES,
+)
 
 # bump when the set of config keys changes; drives ./config migration
 CONFIG_VERSION = 2
@@ -58,11 +62,19 @@ class ConfigSchema:
 
     image_model: str = field(
         default="Unlimited Palette",
-        validator=_choice(["Unlimited Palette", "Limited Palette", "VQGAN"]),
+        validator=_choice(
+            ["Unlimited Palette", "Limited Palette", "VQGAN", "LlamaGen"]
+        ),
     )
     vqgan_model: str = field(
         default="sflickr",
         validator=_choice(VQGAN_MODEL_NAMES + list(VQGAN_MODEL_ALIASES)),
+    )
+    # LlamaGen VQ variant: ds16 = the default look (f=16, same latent-grid
+    # math as taming f16); ds8 = f=8, 4x the tokens, finer texture
+    llamagen_model: str = field(
+        default="ds16",
+        validator=_choice(LLAMAGEN_MODEL_NAMES),
     )
     animation_mode: str = field(
         default="off", validator=_choice(["off", "2D", "3D", "Video Source"])
@@ -74,6 +86,41 @@ class ConfigSchema:
     steps_per_scene: int = 100
     steps_per_frame: int = 50
     interpolation_steps: int = 0
+
+    # Convergence auto-stop: end a scene early once the TOTAL loss plateaus;
+    # steps_per_scene stays the hard cap. The loss is sampled every 10 steps
+    # (one host sync per interval); the scene stops when relative improvement
+    # over the trailing auto_stop_window steps falls below
+    # auto_stop_threshold. Never fires before one full window of samples past
+    # the interpolation ramp; multi-scene runs judge each scene independently.
+    auto_stop: bool = False
+    # trailing window, in steps, over which loss improvement is judged
+    auto_stop_window: int = 50
+    # relative improvement over the window below which the scene is converged
+    auto_stop_threshold: float = 0.002
+
+    # Phase scheduling: quality-phase behavior over normalized scene time
+    # t_hat = step/steps_per_scene (still mode only — fails loud under any
+    # animation_mode). One switch, three fixed schedules (the table lives in
+    # src/pytti/phase_scheduling.py): the smoothing/TV weight ramps
+    # 2x -> 0.5x of its configured value across each scene (structure early,
+    # detail late), Limited Palette locks its palette for the final third
+    # (clean crystallization), and the direct init-hold weight decays
+    # 1x -> 0.5x (anchored start, freer finish). Scales multiply the
+    # evaluated weight, so parametric weight expressions keep working.
+    phase_scheduling: bool = False
+
+    # Coarse-to-fine still rendering (still mode, single scene — fails loud
+    # otherwise): stage 1 renders at half the configured dims (each dim
+    # halved, rounded to /8, floored at 64) for the first 40% of
+    # steps_per_scene; the result is bicubic-upscaled and re-encoded into a
+    # fresh image rep at full dims (Limited Palette carries its learned
+    # palette across), and stage 2 runs the remaining 60% with the stage-1
+    # image as a weight-2 direct init hold plus the normal prompts. Frame
+    # numbering and backups continue across the stage boundary (stage-1
+    # frames save upscaled to the full canvas); auto_stop judges each stage
+    # independently; phase_scheduling's t_hat spans each stage's own steps.
+    coarse_to_fine: bool = False
 
     learning_rate: float | None = None
     reset_lr_each_frame: bool = True
