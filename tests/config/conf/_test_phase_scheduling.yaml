@@ -1,0 +1,37 @@
+# @package _global_
+# Phase-scheduling A/B smoke: a Limited Palette still render that exercises
+# all three schedules — the TV ramp (smoothing_weight), the final-third
+# palette lock, and the init-hold decay (direct_init_weight). The test
+# overrides init_image, file_namespace, phase_scheduling, and
+# perceptor_backend per run.
+#
+# The LPIPS arms run perceptor_backend=torch on device: cpu with the test
+# pinning torch to one thread: that combination is bit-deterministic per
+# seed (scripts/ab_render.py, measured null LPIPS exactly 0.0), so the
+# on/off LPIPS is pure schedule effect. mlx_full finals CANNOT be
+# LPIPS-gated this way: its gather-bilinear backward is a GPU scatter-add
+# with nondeterministic accumulation order, and Limited Palette's discrete
+# argmax decode amplifies that into palette flips — measured same-seed
+# null LPIPS ~0.13 at 60 steps, swamping any A/B. The mlx_full arm is a
+# live completion check instead (its seams are bit-exactly gated by the
+# stub-tower tests in tests/test_phase_scheduling.py).
+device: cpu
+scenes: a photograph of a city skyline
+image_model: Limited Palette
+width: 128
+height: 128
+steps_per_scene: 60
+steps_per_frame: 30
+pre_animation_steps: 0
+save_every: 30
+display_every: 60
+backups: 1
+seed: 24601
+cutouts: 8
+ViTB32: true
+perceptor_backend: torch
+direct_init_weight: "1"
+smoothing_weight: 0.02
+palette_size: 6
+palettes: 6
+file_namespace: phase_smoke

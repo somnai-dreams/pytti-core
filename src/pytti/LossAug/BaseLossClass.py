@@ -11,6 +11,11 @@ class Loss(nn.Module):
         # self.register_buffer('stop', torch.as_tensor(stop))
         self.weight = weight
         self.stop = stop
+        # phase-scheduling seam: multiplies the parametric-eval'd weight
+        # VALUE (the expression string is never rewritten). 1.0 = neutral;
+        # DirectImageGuide sets it per step when phase_scheduling is on,
+        # and the mlx_full engine folds it into its per-step host inputs.
+        self.weight_scale = 1.0
         self.input_axes = ("n", "s", "y", "x")
         self.name = name
         self.enabled = True
@@ -34,7 +39,9 @@ class Loss(nn.Module):
             return zero, zero
         if device is None:
             device = self.device
-        weight = torch.as_tensor(parametric_eval(self.weight), device=device)
+        weight = torch.as_tensor(
+            parametric_eval(self.weight) * self.weight_scale, device=device
+        )
         stop = torch.as_tensor(parametric_eval(self.stop), device=device)
         loss_raw = self.get_loss(input, img)
         loss = loss_raw * weight.sign()
