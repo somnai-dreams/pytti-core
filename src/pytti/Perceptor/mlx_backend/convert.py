@@ -89,6 +89,13 @@ class ModelSpec:
     # don't need a torch perceptor to learn them).
     image_mean: tuple[float, float, float] = OPENAI_CLIP_MEAN
     image_std: tuple[float, float, float] = OPENAI_CLIP_STD
+    # Minimum dtype for CORRECT input-gradients. Measured 2026-08-04: the
+    # 24-layer L/14 towers produce garbage fp16 input-grads on MLX (cosine
+    # 0.20 for L/14, 0.03 for L/14-336 vs torch fp32 — embeddings are fine,
+    # ln_fp32 does not rescue) while fp32 is exactly 1.0. B-scale towers are
+    # healthy in fp16 (>= 0.9957 across the registry). load_tower silently
+    # upgrades to this floor; render speed is the price of correctness.
+    grad_safe_dtype: "TowerDtype" = "float16"
 
 
 # Classic OpenAI tier + FARE (OpenAI ViT architecture throughout). Keys
@@ -133,6 +140,7 @@ MLX_VIT_MODELS: dict[str, ModelSpec] = {
             mlp_dim=4096,
             output_dim=768,
         ),
+        grad_safe_dtype="float32",
     ),
     "ViTL14_336px": ModelSpec(
         "openai/clip-vit-large-patch14-336",
@@ -146,6 +154,7 @@ MLX_VIT_MODELS: dict[str, ModelSpec] = {
             mlp_dim=4096,
             output_dim=768,
         ),
+        grad_safe_dtype="float32",
     ),
     # FARE adversarially-robust B/32 (Schlarmann et al., fine-tuned from
     # laion2B-s34B-b79K). open_clip layout; plain erf-GELU — open_clip
@@ -587,6 +596,18 @@ def load_tower(
         raise ValueError(
             f"dtype must be float16, bfloat16, or float32, got {dtype!r}"
         )
+    # Correctness floor: some towers produce garbage input-grads below a
+    # minimum dtype (see ModelSpec.grad_safe_dtype). Upgrade, never downgrade.
+    floor = _spec_for(key).grad_safe_dtype
+    if floor == "float32" and dtype != "float32":
+        from loguru import logger
+
+        logger.info(
+            f"{key}: fp16 input-gradients are unusable for this tower "
+            f"(measured cosine 0.03-0.20 vs torch); loading float32 instead "
+            f"of {dtype} — slower, correct."
+        )
+        dtype = "float32"
     # bf16 has fewer mantissa bits than fp16 — derive it from the fp32 cache
     # rather than double-rounding through fp16.
     cache_dtype: CacheDtype = "float32" if dtype == "bfloat16" else dtype

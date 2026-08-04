@@ -771,3 +771,16 @@ class TestSigLIPRealWeightParity:
         r = ref.ravel()
         cos = float(r @ g / (np.linalg.norm(r) * np.linalg.norm(g)))
         assert cos >= 0.995  # plan gate 2
+
+
+def test_l14_towers_pin_fp32_grad_floor():
+    # Measured 2026-08-04: 24-layer L/14 towers give garbage fp16
+    # input-grads on MLX (cosine 0.20 / 0.03) with healthy embeddings;
+    # fp32 is exact. The registry must pin the floor so load_tower
+    # upgrades silently.
+    from pytti.Perceptor.mlx_backend.convert import MLX_VIT_MODELS
+
+    for key in ("ViTL14", "ViTL14_336px"):
+        assert MLX_VIT_MODELS[key].grad_safe_dtype == "float32", key
+    for key in ("ViTB32", "ViTB16", "FARE4ViTB32", "SigLIP2B16"):
+        assert MLX_VIT_MODELS[key].grad_safe_dtype == "float16", key
