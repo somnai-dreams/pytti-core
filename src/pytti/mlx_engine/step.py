@@ -190,6 +190,11 @@ class StepConfig:
     noise_fac: float
     sampler: str  # "batched" | "smart"
     gas: int  # gradient_accumulation_steps
+    # config coherence_weighting: per-cutout semantic weights from crop
+    # geometry (sizes_to_coherence_weights). Trace-time constant BY DESIGN:
+    # False must compile the exact pre-feature graph (never an all-ones
+    # multiply), and the flag is fixed for a run so it can never retrace.
+    coherence_weighting: bool = False
 
     def __post_init__(self):
         if self.image_kind not in IMAGE_KINDS:
@@ -252,6 +257,30 @@ def geometric_mask_stops(
             f"unknown geometric mask kind {kind!r}; expected one of {MASK_KINDS}"
         )
     return gate.astype(mx.float32)
+
+
+def sizes_to_coherence_weights(
+    sizes: mx.array, side_x: int, side_y: int
+) -> mx.array:
+    """
+    The MLX mirror of ``Prompt.sizes_to_coherence_weights`` (that docstring
+    is the contract; parity is test-gated): full-frame anchors (min-side
+    size column == 1.0 exactly, per the sampler contract both samplers
+    share) weigh 3x, every cutout scales by its inscribed-square fraction,
+    and the whole vector renormalizes to mean 1 so only the gradient's
+    DISTRIBUTION changes. ``sizes`` is the step's ``[n, C, 2]`` per-cutout
+    geometry — a per-step tensor already in-graph, so this is pure graph
+    math: no host sync, no retrace.
+    """
+    if side_x <= 0 or side_y <= 0:
+        raise ValueError(f"canvas dims must be positive, got {(side_x, side_y)}")
+    if sizes.ndim < 2 or sizes.shape[-1] != 2:
+        raise ValueError(
+            f"sizes must be [..., 2] (x, y) size fractions, got {tuple(sizes.shape)}"
+        )
+    fraction = sizes[..., 0] if side_x <= side_y else sizes[..., 1]
+    raw = mx.where(fraction == 1.0, fraction * 3.0, fraction)
+    return raw / mx.mean(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -434,10 +463,24 @@ def build_step(
         pos = mx.stack([groups[b][1] for b in batch_index], axis=1)
         size = mx.stack([groups[b][2] for b in batch_index], axis=1)
 
+        # coherence weights are shared by every prompt (geometry-only);
+        # computed IN-GRAPH from the sizes already flowing here — per-step
+        # tensors, so the compiled structure is untouched
+        coherence = (
+            sizes_to_coherence_weights(size, cfg.side_x, cfg.side_y)
+            if cfg.coherence_weighting
+            else None
+        )
+
         weights, stops = [], []
         for j, plan in enumerate(prompt_plans):
             # Prompt.forward:314-322 with geometric mask_weights == 1
             weight = p_w[j]
+            if coherence is not None:
+                # multiplies exactly where Prompt.forward composes its mask
+                # weights (coherence > 0, so the sign gymnastics below see
+                # the same signs as the unweighted path)
+                weight = weight * coherence
             mask_stops = geometric_mask_stops(plan.mask_kind, pos, size, p_thresh[j])
             sign_offset = mx.minimum(mx.sign(weight), 0.0)  # sign().clamp(max=0)
             stops.append(mx.maximum(mask_stops + sign_offset, p_s[j]))

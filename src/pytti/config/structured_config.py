@@ -277,6 +277,29 @@ class ConfigSchema:
     cutout_sampler: str = field(
         default="smart", validator=_choice(["classic", "batched", "smart"])
     )
+    # Coherence weighting: redistribute per-cutout SEMANTIC-loss weight by
+    # view size. With uniform weights ~75% of the semantic gradient pushes
+    # each small detail crop toward the FULL prompt — per-patch prompt
+    # stuffing, the classic pytti "tapestry" look. On, full-frame anchor
+    # cuts (the smart sampler's designed population; any full-inscribed-
+    # square draw from batched/classic counts too) weigh 3x and every cut
+    # additionally scales by its size fraction, then the weights renormalize
+    # to mean 1 AND are rescaled per prompt against its mask weights
+    # (mean(|mask| * coh) == mean(|mask|)): gradient DISTRIBUTION shifts
+    # toward global composition while every prompt keeps its configured
+    # strength — including image-masked prompts. Geometric masks gate via
+    # stops, so their interaction remains data-dependent.
+    # Designed for cutout_sampler=smart — under batched/classic only the
+    # size-scaling half reliably applies (their anchor draws are chance,
+    # not designed). Applies on every backend (torch, mlx, mlx_full).
+    # Judged A/B (2026-08-03, golden-lp-still @ 200 steps, modern defaults
+    # FARE4ViTB32+SigLIP2B16/smart/cutn40/mlx_full, same ensemble both legs):
+    # ON beat OFF on BOTH held-out judges — ViT-L/14 0.3064 vs 0.2959
+    # (+0.0105, ~2.5x the ±0.004 judge-noise floor) and SigLIP2-SO400M
+    # 0.2126 vs 0.1946 (+0.0180); final-frame LPIPS 0.575 (a genuinely
+    # different image). Eyeball agrees: OFF is an even-density tapestry,
+    # ON has fore/mid/background and a light source.
+    coherence_weighting: bool = False
     # adamw_sf = schedule-free AdamW (Polyak-averaged eval iterate)
     optimizer: str = field(default="adam", validator=_choice(["adam", "adamw_sf"]))
 

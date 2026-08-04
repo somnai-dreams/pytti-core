@@ -631,8 +631,15 @@ NOISE_FACS = GEO.uniform(0, 0.1, (8, 1, 1, 1)).astype(np.float32)
 NOISE_FIELD = GEO.standard_normal((8, 3, 224, 224)).astype(np.float32)
 AUG_SEED = 4242
 
+# coherence_weighting geometry: GEO_SIZES has no exact-max_size rows, so the
+# anchor half of the knob would never fire — this set has two exact
+# inscribed-square anchors (128 on the 128x128 canvas) + six detail cuts
+COH_SIZES = np.array([128, 128, 96, 64, 48, 80, 56, 112], dtype=np.float32)
+COH_OX = np.array([0, 0, 20, 60, 75, 20, 33, 5], dtype=np.float32)
+COH_OY = np.array([0, 0, 5, 33, 41, 12, 60, 16], dtype=np.float32)
 
-def _torch_fake_batched(with_augs):
+
+def _torch_fake_batched(with_augs, geometry=(GEO_SIZES, GEO_OX, GEO_OY)):
     """Deterministic replacement for samplers.pytti_batched: injected
     geometry, (optionally) the real BatchedAugs re-seeded at a known state,
     injected noise. The MLX cutter below consumes the same constants."""
@@ -640,11 +647,13 @@ def _torch_fake_batched(with_augs):
 
     from pytti.Perceptor.cutouts import samplers
 
+    geo_sizes, geo_ox, geo_oy = geometry
+
     def fake(input, side_x, side_y, cut_size, padding, cutn, cut_pow,
              border_mode, augs, noise_fac, device):
         assert border_mode == "clamp" and cutn == 8
-        sizes_px = torch.tensor(GEO_SIZES)
-        ox, oy = torch.tensor(GEO_OX), torch.tensor(GEO_OY)
+        sizes_px = torch.tensor(geo_sizes)
+        ox, oy = torch.tensor(geo_ox), torch.tensor(geo_oy)
         grid = samplers._affine_crop_grid(
             ox, oy, sizes_px, input.shape[1], cut_size, side_y, side_x
         )
@@ -663,13 +672,14 @@ def _torch_fake_batched(with_augs):
     return fake
 
 
-def _mlx_cutter(with_augs):
+def _mlx_cutter(with_augs, geometry=(GEO_SIZES, GEO_OX, GEO_OY)):
     import mlx.core as mx
 
     from pytti.mlx_engine.augs import AugConfig, apply_augs
     from pytti.mlx_engine.sampler import _cut_batch
     from tests.test_mlx_engine_augs import _injected_params
 
+    geo_sizes, geo_ox, geo_oy = geometry
     if with_augs:
         torch.manual_seed(AUG_SEED)
         aug_params = _injected_params(8)
@@ -679,9 +689,9 @@ def _mlx_cutter(with_augs):
     def cutter(padded, cut_size):
         cutouts, offsets, sizes = _cut_batch(
             padded,
-            mx.array(GEO_SIZES),
-            mx.array(GEO_OX),
-            mx.array(GEO_OY),
+            mx.array(geo_sizes),
+            mx.array(geo_ox),
+            mx.array(geo_oy),
             side_x=128, side_y=128, cut_size=cut_size,
             paddingx=32, paddingy=32, border_mode="clamp",
         )
@@ -728,14 +738,16 @@ class TestFullStepParity:
         return reference, candidate
 
     def _torch_step(self, img, embedder, prompts, augs, monkeypatch, gas,
-                    with_augs):
+                    with_augs, coherence=False):
         from pytti.ImageGuide import DirectImageGuide
         from pytti.Perceptor import Embedder as embedder_module
 
+        geometry = (COH_SIZES, COH_OX, COH_OY) if coherence else \
+            (GEO_SIZES, GEO_OX, GEO_OY)
         monkeypatch.setitem(
             embedder_module.CUTOUT_SAMPLERS,
             "batched",
-            _torch_fake_batched(with_augs),
+            _torch_fake_batched(with_augs, geometry),
         )
         guide = DirectImageGuide(
             image_rep=img,
@@ -744,6 +756,7 @@ class TestFullStepParity:
                 dict(
                     perceptor_backend="torch", optimizer="adam",
                     input_audio="", input_audio_filters=None,
+                    coherence_weighting=coherence,
                 )
             ),
         )
@@ -757,13 +770,16 @@ class TestFullStepParity:
         return pre, record, post
 
     def _mlx_step(self, img, embedder, prompts, augs, tower_dtype, gas,
-                  with_augs):
+                  with_augs, coherence=False):
         from pytti.mlx_engine.engine import MLXStillEngine
         from pytti.mlx_engine.step import trainable_keys_for
 
+        geometry = (COH_SIZES, COH_OX, COH_OY) if coherence else \
+            (GEO_SIZES, GEO_OX, GEO_OY)
         engine = MLXStillEngine(
-            img, embedder, _base_params(), lr=0.02,
-            tower_dtype=tower_dtype, cutter=_mlx_cutter(with_augs),
+            img, embedder, _base_params(coherence_weighting=coherence),
+            lr=0.02, tower_dtype=tower_dtype,
+            cutter=_mlx_cutter(with_augs, geometry),
         )
         record = engine.train_step(
             0, prompts, [], augs, interp_steps=0,
@@ -787,19 +803,24 @@ class TestFullStepParity:
     # cosine 0.63 against these gates.
     @pytest.mark.parametrize(
         (
-            "image_model", "tower_dtype", "gas", "with_augs",
+            "image_model", "tower_dtype", "gas", "with_augs", "coherence",
             "gate", "delta_gate", "delta_cos_gate",
         ),
         [
-            ("pixel", "float32", 1, True, 1e-5, 2e-3, 0.99999),
-            ("pixel", "float16", 1, True, 1e-2, 2.5e-1, 0.97),
-            ("pixel", "float32", 2, False, 1e-5, 2e-3, 0.99999),
-            ("rgb", "float32", 1, True, 1e-5, 2e-3, 0.99999),
+            ("pixel", "float32", 1, True, False, 1e-5, 2e-3, 0.99999),
+            ("pixel", "float16", 1, True, False, 1e-2, 2.5e-1, 0.97),
+            ("pixel", "float32", 2, False, False, 1e-5, 2e-3, 0.99999),
+            ("rgb", "float32", 1, True, False, 1e-5, 2e-3, 0.99999),
+            # coherence_weighting gate 2: same fp32 gates as the plain rows,
+            # anchor-bearing injected geometry (COH_*) so BOTH halves of the
+            # knob (3x anchors + size scaling) cross the backends
+            ("pixel", "float32", 1, False, True, 1e-5, 2e-3, 0.99999),
+            ("rgb", "float32", 1, True, True, 1e-5, 2e-3, 0.99999),
         ],
     )
     def test_full_step_parity(
         self, clip_embedder, monkeypatch, image_model, tower_dtype, gas,
-        with_augs, gate, delta_gate, delta_cos_gate,
+        with_augs, coherence, gate, delta_gate, delta_cos_gate,
     ):
         from pytti.Perceptor.Prompt import parse_prompt
 
@@ -817,11 +838,11 @@ class TestFullStepParity:
 
         pre, torch_record, post = self._torch_step(
             reference, clip_embedder, prompts, augs, monkeypatch, gas,
-            with_augs,
+            with_augs, coherence,
         )
         mlx_record, engine, trainable = self._mlx_step(
             candidate, clip_embedder, prompts, augs, tower_dtype, gas,
-            with_augs,
+            with_augs, coherence,
         )
 
         assert set(mlx_record) == set(torch_record)

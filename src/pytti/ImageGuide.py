@@ -150,6 +150,19 @@ class DirectImageGuide:
         # .bak backups always stay at native dims (they are the state dict).
         self.output_size = tuple(output_size) if output_size is not None else None
 
+        # coherence_weighting (structured_config): non-None = the sampler's
+        # (side_x, side_y) canvas, which switches the per-cutout semantic
+        # weight redistribution on in every torch-side semantic path
+        # (Prompt.forward, the M1 mlx bridge). mlx_full reads the config
+        # flag into its StepConfig instead and computes the same weights
+        # in-graph. One value carries both the switch and the data it needs,
+        # so they can never disagree.
+        self.coherence_canvas = (
+            tuple(image_rep.image_shape)
+            if params is not None and bool(params.get("coherence_weighting", False))
+            else None
+        )
+
         # phase scheduling: fixed quality-phase schedules over normalized
         # scene time t_hat = step/steps_per_scene (the table lives in
         # pytti/phase_scheduling.py; applied per step in train())
@@ -509,6 +522,7 @@ class DirectImageGuide:
                     prompts,
                     interp_prompts if i < interp_steps else [],
                     ramp=t,
+                    coherence_canvas=self.coherence_canvas,
                 )
                 step_record.update(semantic_records)
                 mb_total = mb_total + semantic_total / gradient_accumulation_steps
@@ -524,6 +538,7 @@ class DirectImageGuide:
                             format_input(image_embeds, self.embedder, prompt),
                             format_input(offsets, self.embedder, prompt),
                             format_input(sizes, self.embedder, prompt),
+                            coherence_canvas=self.coherence_canvas,
                         )
                         interp_total = interp_total + loss * (1 - t)
 
@@ -533,6 +548,7 @@ class DirectImageGuide:
                         format_input(image_embeds, self.embedder, prompt),
                         format_input(offsets, self.embedder, prompt),
                         format_input(sizes, self.embedder, prompt),
+                        coherence_canvas=self.coherence_canvas,
                     )
                     prompt_total = prompt_total + loss * t
                     step_record[str(prompt)] = loss_raw.detach()

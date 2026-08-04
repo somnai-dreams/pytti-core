@@ -420,3 +420,42 @@ def test_full_bridge_matches_torch_semantic_loss():
     assert float(raw_m) == pytest.approx(float(raw_t), rel=1e-2)
     cos = torch.nn.functional.cosine_similarity(grads_t, grads_m, dim=0)
     assert float(cos) >= 0.99  # plan gate 2's expected class, full path
+
+
+def test_bridge_constants_mirror_torch_coherence():
+    """Review finding: the M1 bridge's coherence fold had no coverage — a
+    reorder against Prompt.forward would ship green. Pin: the bridge's
+    composed weight equals torch's composition (mask * coh * per-prompt
+    mass rescale) for a tensor-masked prompt."""
+    from pytti.Perceptor.Prompt import sizes_to_coherence_weights
+
+    offsets, sizes = make_geometry(seed=7)
+    g = torch.Generator().manual_seed(9)
+    # mask weights shaped like the FORMATTED geometry [n, C] (image masks
+    # return per-cutout-per-perceptor tensors)
+    mask_w = torch.rand(N, C, generator=g)
+
+    prompt = make_prompt(weight="2")
+
+    def masker(pos, size, emb):
+        return torch.full(size.shape[:-1], -math.inf), mask_w
+
+    masker.embed_dependent = False
+    prompt.mask = masker
+
+    consts = semantic_prompt_constants(
+        prompt, offsets, sizes, StubEmbedder(), coherence_canvas=(128, 96)
+    )
+    from pytti import format_input
+
+    size_fmt = format_input(sizes, StubEmbedder(), prompt)
+    coh = sizes_to_coherence_weights(size_fmt, 128, 96)
+    mw = mask_w.abs()
+    if mw.dim() == 0:
+        mw = mw.expand_as(coh)
+    scale = mw.mean() / (mw * coh).mean().clamp_min(1e-8)
+    expected = (mask_w * 2.0 * coh * scale).to(torch.float32)
+    got = consts.weight
+    assert torch.allclose(
+        got, expected.broadcast_to(got.shape), rtol=1e-6, atol=1e-7
+    )

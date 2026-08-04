@@ -41,6 +41,54 @@ def spherical_dist_loss(x, y):
     return x.sub(y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
 
 
+def sizes_to_coherence_weights(
+    sizes: torch.Tensor, side_x: int, side_y: int
+) -> torch.Tensor:
+    """
+    Per-cutout semantic-loss weights from the cutout samplers' ``sizes``
+    tensor (config ``coherence_weighting``).
+
+    Sampler contract (cutouts/samplers.py, mirrored by mlx_engine/sampler.py):
+    crops are squares of ``size_px <= max_size = min(side_x, side_y)`` pixels
+    and ``sizes[..., (0, 1)] == (size_px / side_x, size_px / side_y)``. The
+    min-side column is therefore exactly ``size_px / max_size`` — the crop's
+    fraction of the inscribed square (one fp division of integral values, so
+    a full-frame anchor reads exactly 1.0 even on non-square canvases).
+
+    Weights: full-frame anchors (fraction == 1.0 — the smart sampler's
+    designed anchor population; batched/classic full-size draws, which their
+    clamp-to-1 produces ~25% of the time, count identically) get 3.0x, and
+    EVERY cutout additionally scales by its fraction; the whole vector is
+    then normalized to mean ~1.0 (fp rounding leaves the fp32 mean a few
+    ulp off for adverse inputs). Mass conservation is completed at the
+    COMPOSITION sites (Prompt.forward / the M1 bridge): coherence composes
+    multiplicatively with mask weights and is rescaled per prompt so
+    mean(|mask| * coh) == mean(|mask|) — uniform masks make that a no-op,
+    non-uniform image masks keep their configured strength instead of
+    silently rescaling by the mask/coherence covariance. Geometric masks
+    gate via STOPS rather than weights, so their interaction is inherently
+    data-dependent and is not (and cannot be) renormalized. Rationale:
+    with uniform weights ~75% of semantic gradient pushes small crops
+    toward the FULL prompt (per-patch prompt stuffing = the tapestry
+    look); anchors must outvote patches on global composition.
+
+    ``sizes`` is ``[..., 2]`` with the cutout/perceptor axes leading (either
+    order — the normalization is over all elements, so it is invariant to
+    axis order and to LocationAwareMCIP's row permutation); returns
+    ``sizes.shape[:-1]``, strictly positive. Pure and sync-free: safe in the
+    step path on any device and inside the MLX graph's torch twin.
+    """
+    if side_x <= 0 or side_y <= 0:
+        raise ValueError(f"canvas dims must be positive, got {(side_x, side_y)}")
+    if sizes.ndim < 2 or sizes.shape[-1] != 2:
+        raise ValueError(
+            f"sizes must be [..., 2] (x, y) size fractions, got {tuple(sizes.shape)}"
+        )
+    fraction = sizes[..., 0] if side_x <= side_y else sizes[..., 1]
+    raw = torch.where(fraction == 1.0, fraction * 3.0, fraction)
+    return raw / raw.mean()
+
+
 def make_mask(spec: MaskSpec, thresh):
     """
     Turn a typed MaskSpec into a mask callable (or a Rotoscoper for video
@@ -299,10 +347,20 @@ class Prompt(nn.Module):
     def set_enabled(self, enabled):
         self.enabled = enabled
 
-    def forward(self, embed, position, size, offset=0.0, device=None):
+    def forward(
+        self, embed, position, size, offset=0.0, device=None, coherence_canvas=None
+    ):
         """
         input: (Tensor) input CLIP embedding
         returns the input's loss compared to the saved embedding
+
+        coherence_canvas: None (off), or the (side_x, side_y) canvas dims the
+        sampler normalized `size` by — non-None applies the config
+        ``coherence_weighting`` per-cutout weights (anchors 3x, everything
+        scaled by view size, mean renormalized to 1; see
+        sizes_to_coherence_weights). They compose MULTIPLICATIVELY with the
+        spatial/semantic mask weights below: a masked detail crop is
+        down-weighted by both its mask and its size.
         """
         if device is None:
             device = self.device
@@ -316,6 +374,21 @@ class Prompt(nn.Module):
 
         mask_stops, mask_weights = self.mask(position, size, embed.detach())
         weight = torch.as_tensor(mask_weights, device=device) * weight
+        if coherence_canvas is not None:
+            coh = sizes_to_coherence_weights(size, *coherence_canvas)
+            # Coherence REDISTRIBUTES this prompt's gradient across views —
+            # it must not change the prompt's total strength. With uniform
+            # mask weights the mean-1 coh vector already conserves mass
+            # (scale == 1 to fp rounding); with non-uniform mask weights
+            # (image masks / rotoscopes) the covariance between mask and
+            # coh would silently rescale the prompt up to ~3x, so rescale
+            # per prompt: mean(|mask| * coh * scale) == mean(|mask|).
+            # No host syncs — everything stays on-device.
+            mw = torch.as_tensor(mask_weights, device=device, dtype=coh.dtype).abs()
+            if mw.dim() == 0:
+                mw = mw.expand_as(coh)
+            scale = mw.mean() / (mw * coh).mean().clamp_min(1e-8)
+            weight = weight * coh * scale
         sign_offset = weight.sign().clamp(max=0)
 
         dists = dists_raw * weight.sign()
@@ -395,10 +468,15 @@ def minimize_average_distance(tensor_a, tensor_b):
 
 
 class LocationAwareMCIP(MultiClipImagePrompt):
-    def forward(self, embed, position, size):
+    def forward(self, embed, position, size, coherence_canvas=None):
         """
         input: (Tensor) input CLIP embedding
         returns the input's loss compared to the saved embedding
+
+        coherence_canvas passes through to Prompt.forward, which computes the
+        coherence weights from the PERMUTED size rows below — the weights
+        follow each row's own geometry, and the mean normalization is
+        permutation-invariant.
         """
         cent_a = self.positions + self.sizes / 2
         cent_b = position + size / 2
@@ -406,4 +484,6 @@ class LocationAwareMCIP(MultiClipImagePrompt):
         embed = torch.stack([a[i] for a, i in zip(embed, indices, strict=True)])
         position = torch.stack([a[i] for a, i in zip(position, indices, strict=True)])
         size = torch.stack([a[i] for a, i in zip(size, indices, strict=True)])
-        return super().forward(embed, position, size, offset=0.7)
+        return super().forward(
+            embed, position, size, offset=0.7, coherence_canvas=coherence_canvas
+        )

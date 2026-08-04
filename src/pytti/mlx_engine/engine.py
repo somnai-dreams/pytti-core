@@ -217,6 +217,7 @@ class MLXStillEngine:
             border_mode=str(embedder.border_mode),
             noise_fac=float(embedder.noise_fac),
             sampler=str(embedder.cutout_sampler),
+            coherence_weighting=bool(params.get("coherence_weighting", False)),
         )
         # aug stack config: parsed from the live torch module, not assumed
         augs = embedder.augs

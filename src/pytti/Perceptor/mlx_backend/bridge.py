@@ -57,7 +57,7 @@ from loguru import logger
 from pytti import format_input
 from pytti.eval_tools import is_zero_weight, parametric_eval
 from pytti.Perceptor.mlx_backend.convert import MLX_VIT_MODELS
-from pytti.Perceptor.Prompt import Prompt
+from pytti.Perceptor.Prompt import Prompt, sizes_to_coherence_weights
 
 
 def _sync_torch(device: torch.device) -> None:
@@ -97,6 +97,7 @@ def semantic_prompt_constants(
     offsets: torch.Tensor,
     sizes: torch.Tensor,
     embedder,
+    coherence_canvas: "tuple[int, int] | None" = None,
 ) -> PromptConstants | None:
     """
     Recompute the constant half of ``Prompt.forward`` for one step.
@@ -104,6 +105,9 @@ def semantic_prompt_constants(
     `offsets`/`sizes` are the embedder-stacked ``[C, n, 2]`` crop geometry
     tensors. Returns None for prompts that contribute nothing this step
     (disabled or zero weight — matching the early-out in Prompt.forward).
+    ``coherence_canvas`` mirrors Prompt.forward's parameter: non-None folds
+    the config ``coherence_weighting`` per-cutout weights into the constant
+    weight vector (they are geometry-only, so they belong here).
     """
     if type(prompt) is not Prompt:
         raise RuntimeError(
@@ -131,6 +135,15 @@ def semantic_prompt_constants(
     stop = torch.as_tensor(parametric_eval(prompt.stop), device=device)
     mask_stops, mask_weights = prompt.mask(position, size, None)
     weight = torch.as_tensor(mask_weights, device=device) * weight
+    if coherence_canvas is not None:
+        # per-prompt mass renormalization — the exact mirror of
+        # Prompt.forward (coherence redistributes, never rescales)
+        coh = sizes_to_coherence_weights(size, *coherence_canvas)
+        mw = torch.as_tensor(mask_weights, device=device, dtype=coh.dtype).abs()
+        if mw.dim() == 0:
+            mw = mw.expand_as(coh)
+        scale = mw.mean() / (mw * coh).mean().clamp_min(1e-8)
+        weight = weight * coh * scale
     sign_offset = weight.sign().clamp(max=0)
     stops = torch.maximum(mask_stops + sign_offset, stop)
 
@@ -323,12 +336,15 @@ class MLXSemanticLoss:
         prompts: list,
         interp_prompts: list,
         ramp: float,
+        coherence_canvas: "tuple[int, int] | None" = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         One microbatch of semantic loss. `prompts` enter scaled by ``ramp``
         and are recorded under ``str(prompt)`` (raw, unweighted — same names
         and values as the torch path's loss records); `interp_prompts` enter
         scaled by ``1 - ramp`` and are not recorded (matching train()).
+        ``coherence_canvas`` is threaded into every prompt's constants
+        (see semantic_prompt_constants).
 
         Returns (total, records): ``total`` is differentiable w.r.t. the
         image; record values are detached 0-dim device tensors.
@@ -349,7 +365,11 @@ class MLXSemanticLoss:
             ):
                 for prompt in prompt_list:
                     consts = semantic_prompt_constants(
-                        prompt, offsets, sizes, embedder
+                        prompt,
+                        offsets,
+                        sizes,
+                        embedder,
+                        coherence_canvas=coherence_canvas,
                     )
                     if consts is None:
                         # Prompt.forward's early-out contributes offset=0
