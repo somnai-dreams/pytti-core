@@ -1,0 +1,27 @@
+# @package _global_
+# Coarse-to-fine live smoke: Limited Palette 512px still on mlx_full.
+# stage_steps(50) = (20, 30) and coarse_dims(512, 512) = (256, 256), so the
+# run renders 20 steps at 256, upscales, and finishes 30 steps at 512 with
+# the stage-1 image held at direct init weight 2. save_every 5 puts frames
+# 1-4 in stage 1 and 5-10 in stage 2 (all saved at 512 — stage-1 frames are
+# upscaled on save).
+# a structurally rich prompt: 4 steps from random must NOT already look
+# like the stage-1 final, so the derivation correlation check discriminates
+scenes: an ancient stone temple overgrown with vines
+image_model: Limited Palette
+width: 512
+height: 512
+palette_size: 6
+palettes: 9
+steps_per_scene: 50
+steps_per_frame: 25
+pre_animation_steps: 0
+save_every: 5
+display_every: 50
+backups: 2
+seed: 12345
+cutouts: 8
+ViTB32: true
+perceptor_backend: mlx_full
+coarse_to_fine: true
+file_namespace: c2f_smoke

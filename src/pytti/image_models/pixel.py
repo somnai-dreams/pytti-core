@@ -259,6 +259,24 @@ class PixelImage(DifferentiableImage):
             self.use_palette_target = True
 
     @torch.no_grad()
+    def copy_palette_from(self, other: "PixelImage"):
+        """
+        Carry another PixelImage's learned palette (the raw parameter) into
+        this image. The spatial params (value/tensor) are NOT touched — they
+        are re-derived from pixels by encode_image. This is coarse-to-fine's
+        palette carry: combined with lock_palette(True) before the encode
+        fit, the fit assigns pixels against exactly the carried colors
+        instead of re-fitting a palette from scratch.
+        """
+        if self.palette.shape != other.palette.shape:
+            raise ValueError(
+                "cannot carry a palette across shapes: "
+                f"{tuple(other.palette.shape)} -> {tuple(self.palette.shape)}"
+                " — palette_size and palettes must match"
+            )
+        self.palette.set_(other.palette.detach().clone().to(self.palette.device))
+
+    @torch.no_grad()
     def lock_palette(self, lock=True):
         """
         If lock is True, set the palette_target attribute to the value of the sort_palette method
