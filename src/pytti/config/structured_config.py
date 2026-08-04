@@ -125,8 +125,11 @@ class ConfigSchema:
     learning_rate: float | None = None
     reset_lr_each_frame: bool = True
     seed: int | None = None  # None = a fresh random seed each run
-    # 16 is tuned for the smart sampler; classic/batched want ~40
-    cutouts: int = 16
+    # 40: the modern default ensemble (FARE+SigLIP2) is judged-monotonic in
+    # cut count (16: 0.284, 24: 0.291, 40: 0.314 held-out, 2026-08-04) and
+    # 40 is the tested-and-loved config. The classic pair held quality at
+    # smart@16 if speed matters more than composition.
+    cutouts: int = 40
     cut_pow: float = 2
     cutout_border: float = 0.25
     border_mode: str = field(

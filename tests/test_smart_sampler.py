@@ -344,7 +344,7 @@ def test_config_smart_default_and_batched_selectable():
     with initialize(config_path="config", version_base=None):
         cfg = compose(config_name="_structured_config", overrides=["scenes=x"])
     obj = OmegaConf.to_object(cfg)
-    # A/B verdict 2026-07-31: smart@16 beat batched@40 on held-out
-    # adherence at ~2.3x less tower compute
+    # smart stays the default sampler; cutouts returned to 40 for the
+    # modern default ensemble (judged-monotonic in cut count, 2026-08-04)
     assert obj.cutout_sampler == "smart"
-    assert obj.cutouts == 16
+    assert obj.cutouts == 40
