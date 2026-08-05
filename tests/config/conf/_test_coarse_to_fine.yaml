@@ -1,6 +1,7 @@
 # @package _global_
 # Coarse-to-fine live smoke: Limited Palette 512px still on mlx_full.
-# stage_steps(50) = (20, 30) and coarse_dims(512, 512) = (256, 256), so the
+# stage_steps(50, 2) = (20, 30) and stage_dims(512, 512, 2) opens at
+# (256, 256), so the
 # run renders 20 steps at 256, upscales, and finishes 30 steps at 512 with
 # the stage-1 image held at direct init weight 2. save_every 5 puts frames
 # 1-4 in stage 1 and 5-10 in stage 2 (all saved at 512 — stage-1 frames are

@@ -1,0 +1,32 @@
+# @package _global_
+# Three-stage pyramid live smoke: Limited Palette 256px still on mlx_full.
+# stage_steps(48, 3) = (12, 12, 24) and stage_dims(256, 256, 3) =
+# (64, 128, 256), so the run composes 12 steps at 64px, upscales, refines
+# 12 steps at 128px, upscales again, and finishes 24 steps at 256px — the
+# previous stage held at direct init weight 2 across each seam. Stages 1
+# and 2 sit at/below the 224px ViT-B/32 input, so both must force
+# cutout_sampler=full (thumbnail-stage sampling); stage 3 must not.
+# save_every 4 puts frames 1-3 in stage 1, 4-6 in stage 2, 7-12 in stage 3
+# (all saved at 256 — early-stage frames are upscaled on save).
+# a structurally rich prompt: a few steps from random must NOT already look
+# like the previous stage's final, so the derivation correlation check
+# discriminates
+scenes: an ancient stone temple overgrown with vines
+image_model: Limited Palette
+width: 256
+height: 256
+palette_size: 6
+palettes: 9
+steps_per_scene: 48
+steps_per_frame: 25
+pre_animation_steps: 0
+save_every: 4
+display_every: 50
+backups: 2
+seed: 12345
+cutouts: 8
+ViTB32: true
+perceptor_backend: mlx_full
+coarse_to_fine: true
+coarse_stages: 3
+file_namespace: c2f_pyramid

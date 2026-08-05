@@ -6,7 +6,6 @@ ConfigStore, so unknown keys and invalid values fail at startup with a
 message instead of surfacing as AttributeErrors mid-render.
 """
 
-
 from attrs import define, field
 from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING
@@ -30,6 +29,14 @@ def _choice(valid_values):
             )
 
     return validator
+
+
+def _coarse_stages_validator(self, attribute, value):
+    # deferred import: keeps this schema module import-light; fires at
+    # attrs instantiation (OmegaConf.to_object), long after import time
+    from pytti.coarse_to_fine import validate_coarse_stages
+
+    validate_coarse_stages(coarse_to_fine=self.coarse_to_fine, coarse_stages=value)
 
 
 @define(auto_attribs=True)
@@ -111,16 +118,32 @@ class ConfigSchema:
     phase_scheduling: bool = False
 
     # Coarse-to-fine still rendering (still mode, single scene — fails loud
-    # otherwise): stage 1 renders at half the configured dims (each dim
-    # halved, rounded to /8, floored at 64) for the first 40% of
-    # steps_per_scene; the result is bicubic-upscaled and re-encoded into a
-    # fresh image rep at full dims (Limited Palette carries its learned
-    # palette across), and stage 2 runs the remaining 60% with the stage-1
-    # image as a weight-2 direct init hold plus the normal prompts. Frame
-    # numbering and backups continue across the stage boundary (stage-1
+    # otherwise): the render runs as a ladder of stages (coarse_stages,
+    # below); each stage renders at reduced dims, then the result is
+    # bicubic-upscaled and re-encoded into a fresh image rep at the next
+    # stage's dims (Limited Palette carries its learned palette across),
+    # and the next stage continues with the previous stage's image as a
+    # weight-2 direct init hold plus the normal prompts. Frame numbering
+    # and backups continue across every stage boundary (non-final-stage
     # frames save upscaled to the full canvas); auto_stop judges each stage
     # independently; phase_scheduling's t_hat spans each stage's own steps.
     coarse_to_fine: bool = False
+    # Number of coarse-to-fine stages — the pyramid: compose as a small
+    # thumbnail first, then repeatedly scale up and keep rendering. Only
+    # meaningful with coarse_to_fine: true (any other value alongside
+    # coarse_to_fine: false is rejected loudly). Geometric dims ladder
+    # ending at the configured canvas, every non-final stage /8-rounded
+    # with a 64px floor: stages=3 -> 1/4, 1/2, 1; stages=4 -> 1/8, 1/4,
+    # 1/2, 1. A 512 canvas at stages=3 opens at 128px — SMALLER than the
+    # 224px perceptor input, i.e. the full frame is observed at
+    # better-than-native resolution while the composition forms; any stage
+    # whose canvas short side is <= the largest perceptor input forces
+    # cutout_sampler=full for that stage (random crops there would
+    # upsample the whole frame anyway). Earlier stages get fewer steps:
+    # stages=2 -> 40/60% of steps_per_scene, 3 -> 25/25/50,
+    # 4 -> 15/20/25/40 (table in src/pytti/coarse_to_fine.py; needs
+    # steps_per_scene >= 3 * coarse_stages).
+    coarse_stages: int = field(default=2, validator=_coarse_stages_validator)
 
     learning_rate: float | None = None
     reset_lr_each_frame: bool = True
