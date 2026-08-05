@@ -7,6 +7,9 @@ import gc
 import os
 import random
 import re
+import socket
+import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,9 +30,11 @@ from pytti import (
     vram_usage_mode,
 )
 from pytti.coarse_to_fine import (
-    coarse_dims,
+    is_thumbnail_stage,
     resume_stage,
+    stage_dims,
     stage_steps,
+    validate_coarse_stages,
     validate_coarse_to_fine,
 )
 
@@ -60,6 +65,62 @@ from pytti.warmup import (
     migrate_local_config,
     register_resolvers,
 )
+
+HUB_PROBE_TIMEOUT_S = 2.0
+
+
+def _hub_host_port() -> tuple[str, int]:
+    """Host/port of the HF hub endpoint (honors an HF_ENDPOINT override)."""
+    endpoint = os.environ.get("HF_ENDPOINT", "").strip() or "https://huggingface.co"
+    parts = urllib.parse.urlsplit(endpoint)
+    if parts.hostname is None:
+        raise ValueError(f"HF_ENDPOINT {endpoint!r} has no hostname")
+    return parts.hostname, parts.port or (80 if parts.scheme == "http" else 443)
+
+
+def hub_reachable(timeout_s: float = HUB_PROBE_TIMEOUT_S) -> bool:
+    """One short TCP connect to the hub endpoint; False on DNS failure,
+    no route, refusal, or timeout."""
+    host, port = _hub_host_port()
+    try:
+        socket.create_connection((host, port), timeout=timeout_s).close()
+    except OSError:
+        return False
+    return True
+
+
+def configure_offline_fallback(probe: Callable[[], bool] = hub_reachable) -> bool:
+    """
+    Offline robustness (live user bug): with the machine offline,
+    huggingface_hub still resolves tokenizers/configs against
+    huggingface.co even when every file is cached, so a render hangs for
+    minutes at step 0 before failing. Probe hub reachability ONCE (~2s
+    budget) and pre-set offline mode when the hub is unreachable, so hub
+    lookups go straight to the local cache. A cache MISS under offline
+    mode still fails loud with the hub's LocalEntryNotFoundError naming
+    the missing repo.
+
+    Must run before anything imports huggingface_hub — its constants
+    module freezes HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE at import time
+    (verified on 1.26.0), and pytti defers that import until load_clip.
+
+    A pre-set HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE (any value, even
+    "0") is the user's decision: skipped, never overridden.
+
+    Returns True when the probe engaged offline mode.
+    """
+    if (
+        os.environ.get("HF_HUB_OFFLINE") is not None
+        or os.environ.get("TRANSFORMERS_OFFLINE") is not None
+    ):
+        return False
+    if probe():
+        return False
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    host, port = _hub_host_port()
+    logger.info(f"hub {host}:{port} unreachable — offline: using cached models only")
+    return True
 
 
 def parse_scenes(
@@ -374,31 +435,57 @@ def run_coarse_to_fine(
     *, params, device, embedder, prompts, init_image_pil, base_name, restore
 ):
     """
-    Two-stage still render (coarse_to_fine: true) — stage semantics in
-    pytti/coarse_to_fine.py's module docstring. Frame numbering is
-    monotonic across stages: both guides share base_name/save_every and
-    stage 2's run_steps starts at global offset stage1_steps, so update()'s
-    save slots and the .bak numbering continue the sequence (STUDIO's frame
-    scan and the restore path never see a reset).
+    Staged still render (coarse_to_fine: true, coarse_stages stages) —
+    stage semantics in pytti/coarse_to_fine.py's module docstring. Frame
+    numbering is monotonic across stages: every guide shares
+    base_name/save_every and each stage's run_steps starts at the global
+    offset where the previous stage ended, so update()'s save slots and the
+    .bak numbering continue the sequence (STUDIO's frame scan and the
+    restore path never see a reset).
 
-    Restore maps the restored global step back onto the stages
-    (coarse_to_fine.resume_stage): a step inside stage 1 rebuilds the coarse
-    rep (the .bak at that slot holds coarse dims) and replays the
-    transition; a step inside stage 2 rebuilds the full rep and reloads the
-    persisted transition image for the weight-2 hold.
+    Restore maps the restored global step back onto the stage ladder
+    (coarse_to_fine.resume_stage): a step inside stage k rebuilds stage k's
+    rep (the .bak at that slot holds stage-k dims) and replays the
+    remainder of the ladder; resuming into stage k > 1 reloads the
+    persisted stage-(k-1) transition image for the weight-2 hold.
 
-    Costs, documented: the stage-2 guide is a fresh construction, so
+    Thumbnail-stage sampling: any stage whose canvas short side is at or
+    below the largest perceptor input runs with cutout_sampler=full
+    (coarse_to_fine.is_thumbnail_stage) — random crops there upsample
+    (nearly) the whole frame anyway, so the designed full-frame sampler is
+    forced for exactly those stages, on torch and mlx alike (the embedder's
+    live sampler attribute is what both the torch cutout path and the
+    mlx_full engine construction read).
+
+    Costs, documented: every stage's guide is a fresh construction, so
     mlx_full recompiles its whole-step graph once (and reloads its towers)
-    at the transition; the mlx RNG also reseeds from the same config seed,
-    so stage 2 replays the same cutout draw sequence stage 1 used —
-    same-seed-two-runs semantics, not a correctness issue.
+    at each transition; the mlx RNG also reseeds from the same config seed,
+    so each stage replays the same cutout draw sequence — same-seed-N-runs
+    semantics, not a correctness issue.
     """
-    stage1_steps, stage2_steps = stage_steps(params.steps_per_scene)
-    coarse_w, coarse_h = coarse_dims(params.width, params.height)
+    splits = stage_steps(params.steps_per_scene, params.coarse_stages)
+    dims = stage_dims(params.width, params.height, params.coarse_stages)
+    n_stages = len(splits)
     scene = prompts[0]
-
     backup_dir = Path("backup") / params.file_namespace
-    coarse_png = backup_dir / f"{base_name}_coarse.png"
+
+    # classic+mlx_full is rejected by the engine at guide construction on
+    # plain runs; a thumbnail stage 1 forcing sampler=full would mask the
+    # configured value and defer that rejection until AFTER stage 1
+    # rendered — reject the configured pair up front instead (mirrors
+    # mlx_engine.engine.MLXStillEngine._validate_config).
+    if params.perceptor_backend == "mlx_full" and params.cutout_sampler == "classic":
+        raise ValueError(
+            "perceptor_backend=mlx_full does not support "
+            "cutout_sampler=classic (torch-only): use "
+            "cutout_sampler=batched|smart|full, or perceptor_backend=torch."
+        )
+
+    def transition_png(stage_number: int) -> Path:
+        # the persisted seam written when stage `stage_number` completes
+        # (always at the full canvas) — also the resume seam for restores
+        # that land in stage_number + 1
+        return backup_dir / f"{base_name}_coarse_{stage_number}.png"
 
     if restore:
         filename, restore_frame = get_last_file(
@@ -416,94 +503,125 @@ def run_coarse_to_fine(
         bak_path = None
         i_restore = 0
 
-    stage, stage_done = resume_stage(i_restore, stage1_steps)
+    stage_start, stage_done = resume_stage(i_restore, splits)
 
-    stage1_img = None
-    if stage == 1:
-        p1 = copy.deepcopy(params)
-        p1.width, p1.height = coarse_w, coarse_h
-        p1.steps_per_scene = stage1_steps
-        logger.info(
-            f"coarse_to_fine stage 1/2: {coarse_w}x{coarse_h} for steps "
-            f"0..{stage1_steps} of {params.steps_per_scene}"
-        )
-        setup1 = configure_pass(
-            p1, device, embedder, prompts, init_image_pil, None, restore
-        )
-        if bak_path is not None:
-            setup1.img.load_state_dict(torch.load(bak_path))
-        canvas = full_canvas(params, setup1.img)
-        model1 = make_guide(p1, setup1, embedder, base_name, output_size=canvas)
-        model1.run_steps(
-            stage1_steps - stage_done,
-            scene,
-            scene,
-            setup1.loss_augs,
-            interp_steps=p1.interpolation_steps,
-            i_offset=stage_done,
-            skipped_steps=stage_done,
-            gradient_accumulation_steps=p1.gradient_accumulation_steps,
-        )
+    configured_sampler = embedder.cutout_sampler
+    max_cut_size = max(embedder.cut_sizes)
+    prev_img = None  # previous stage's live rep (Limited Palette carry)
+    stage_init_pil = init_image_pil  # stage 1 inits from the user's image
+    canvas = None
 
-        # transition: decode -> bicubic upscale -> persist (the persisted
-        # PNG is also the resume seam for restores that land in stage 2)
-        stage1_img = setup1.img
-        stage2_init_pil = model1.decode_output_image().resize(canvas, Image.BICUBIC)
-        stage2_init_pil.save(coarse_png)
-        logger.info(
-            f"coarse_to_fine transition: upscaled stage-1 result to "
-            f"{canvas[0]}x{canvas[1]} ({coarse_png})"
-        )
-        del model1, setup1
-        gc.collect()
-        empty_cache()
-        stage2_restore = False
-        stage2_done = 0
-    else:
-        if not coarse_png.is_file():
-            raise FileNotFoundError(
-                f"resuming coarse_to_fine inside stage 2 needs the stage-1 "
-                f"transition image at {coarse_png}, which is missing — "
-                "restart the render without restore=true"
+    try:
+        for stage_number in range(stage_start, n_stages + 1):
+            idx = stage_number - 1
+            w, h = dims[idx]
+            offset = sum(splits[:idx])
+            resumed_here = restore and stage_number == stage_start
+            done = stage_done if stage_number == stage_start else 0
+
+            p = copy.deepcopy(params)
+            p.width, p.height = w, h
+            p.steps_per_scene = splits[idx]
+            if stage_number > 1:
+                seam = transition_png(stage_number - 1)
+                if resumed_here:
+                    if not seam.is_file():
+                        raise FileNotFoundError(
+                            f"resuming coarse_to_fine inside stage "
+                            f"{stage_number} needs the stage-"
+                            f"{stage_number - 1} transition image at {seam}, "
+                            "which is missing — restart the render without "
+                            "restore=true"
+                        )
+                    stage_init_pil = Image.open(seam).convert("RGB")
+                p.init_image = str(seam)  # names the hold in logs/records
+                p.direct_init_weight = "2"  # structural hold on the previous stage
+                p.semantic_init_weight = ""  # validated off for coarse_to_fine
+
+            logger.info(
+                f"coarse_to_fine stage {stage_number}/{n_stages}: {w}x{h} "
+                f"for steps {offset}..{offset + splits[idx]} of "
+                f"{params.steps_per_scene}"
+                + (
+                    ", previous stage held at direct init weight 2"
+                    if stage_number > 1
+                    else ""
+                )
             )
-        stage2_init_pil = Image.open(coarse_png).convert("RGB")
-        stage2_restore = True
-        stage2_done = stage_done
+            setup = configure_pass(
+                p,
+                device,
+                embedder,
+                prompts,
+                stage_init_pil,
+                None,
+                resumed_here,
+                palette_source=prev_img if isinstance(prev_img, PixelImage) else None,
+            )
+            if resumed_here and bak_path is not None:
+                setup.img.load_state_dict(torch.load(bak_path))
+            if canvas is None:
+                canvas = full_canvas(params, setup.img)
 
-    p2 = copy.deepcopy(params)
-    p2.steps_per_scene = stage2_steps
-    p2.init_image = str(coarse_png)  # names the hold in logs/loss records
-    p2.direct_init_weight = "2"  # strong-ish structural hold on stage 1
-    p2.semantic_init_weight = ""  # validated off for coarse_to_fine
-    logger.info(
-        f"coarse_to_fine stage 2/2: {params.width}x{params.height} for steps "
-        f"{stage1_steps}..{params.steps_per_scene}, stage-1 image held at "
-        "direct init weight 2"
-    )
-    setup2 = configure_pass(
-        p2,
-        device,
-        embedder,
-        prompts,
-        stage2_init_pil,
-        None,
-        stage2_restore,
-        palette_source=stage1_img if isinstance(stage1_img, PixelImage) else None,
-    )
-    if stage2_restore:
-        setup2.img.load_state_dict(torch.load(bak_path))
-    model2 = make_guide(p2, setup2, embedder, base_name)
-    model2.run_steps(
-        stage2_steps - stage2_done,
-        scene,
-        scene,
-        setup2.loss_augs,
-        # stage 2 starts mid-scene, not at a scene boundary: no interp ramp
-        interp_steps=0,
-        i_offset=stage1_steps + stage2_done,
-        skipped_steps=stage2_done,
-        gradient_accumulation_steps=p2.gradient_accumulation_steps,
-    )
+            # thumbnail-stage sampling: set per stage on the live embedder
+            # attribute — the torch cutout path reads it at every
+            # make_cutouts call and the mlx_full engine snapshots it at
+            # construction (in make_guide below), so one assignment covers
+            # both backends.
+            side_px = tuple(setup.img.image_shape)
+            if is_thumbnail_stage(side_px, max_cut_size):
+                embedder.cutout_sampler = "full"
+                if configured_sampler != "full":
+                    logger.info(
+                        f"coarse_to_fine stage {stage_number}/{n_stages}: "
+                        f"canvas {side_px[0]}x{side_px[1]}px is at or below "
+                        f"the largest perceptor input ({max_cut_size}px), "
+                        "so every random crop would upsample the whole "
+                        "frame anyway — forcing cutout_sampler=full for "
+                        f"this stage (configured: {configured_sampler})"
+                    )
+            else:
+                embedder.cutout_sampler = configured_sampler
+
+            is_final = stage_number == n_stages
+            model = make_guide(
+                p,
+                setup,
+                embedder,
+                base_name,
+                output_size=None if is_final else canvas,
+            )
+            model.run_steps(
+                splits[idx] - done,
+                scene,
+                scene,
+                setup.loss_augs,
+                # later stages start mid-scene, not at a scene boundary:
+                # no interp ramp
+                interp_steps=p.interpolation_steps if stage_number == 1 else 0,
+                i_offset=offset + done,
+                skipped_steps=done,
+                gradient_accumulation_steps=p.gradient_accumulation_steps,
+            )
+            if is_final:
+                break
+
+            # transition: decode -> bicubic upscale to the full canvas ->
+            # persist; the next pass re-encodes it at its own dims
+            seam = transition_png(stage_number)
+            stage_init_pil = model.decode_output_image().resize(canvas, Image.BICUBIC)
+            stage_init_pil.save(seam)
+            logger.info(
+                f"coarse_to_fine transition {stage_number}->"
+                f"{stage_number + 1}: upscaled the stage-{stage_number} "
+                f"result to {canvas[0]}x{canvas[1]} ({seam})"
+            )
+            prev_img = setup.img
+            del model, setup
+            gc.collect()
+            empty_cache()
+    finally:
+        embedder.cutout_sampler = configured_sampler
 
 
 @hydra.main(config_path="config", config_name="default", version_base=None)
@@ -557,7 +675,12 @@ def _hydra_main(cfg: DictConfig):
         restore_frame = latest
 
         # coarse_to_fine rejects every config it has no stage semantics for
-        # BEFORE any model loads
+        # BEFORE any model loads (coarse_stages is checked unconditionally:
+        # a non-default value on a run that ignores it is a config lie)
+        validate_coarse_stages(
+            coarse_to_fine=params.coarse_to_fine,
+            coarse_stages=params.coarse_stages,
+        )
         if params.coarse_to_fine:
             validate_coarse_to_fine(
                 animation_mode=params.animation_mode,
@@ -568,7 +691,8 @@ def _hydra_main(cfg: DictConfig):
                     params.semantic_stabilization_weight
                 ),
             )
-            stage_steps(params.steps_per_scene)  # fail loud on a bad split
+            # fail loud on a bad step split
+            stage_steps(params.steps_per_scene, params.coarse_stages)
 
         # set up seed for deterministic RNG
         if params.seed is None:
@@ -580,7 +704,9 @@ def _hydra_main(cfg: DictConfig):
         # Phase 2 - load and parse
         ###########################
 
-        # load CLIP
+        # load CLIP — probing hub reachability first, so a dead network
+        # reads the cache immediately instead of hanging on per-file HEADs
+        configure_offline_fallback()
         load_clip(params, device=device)
 
         cutn = params.cutouts
