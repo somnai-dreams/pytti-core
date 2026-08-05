@@ -31,6 +31,14 @@ def _choice(valid_values):
     return validator
 
 
+def _init_spectrum_falloff_validator(self, attribute, value):
+    # deferred import: keeps this schema module import-light; fires at
+    # attrs instantiation (OmegaConf.to_object), long after import time
+    from pytti.image_models.init_noise import validate_spectrum_falloff
+
+    validate_spectrum_falloff(value)
+
+
 def _coarse_stages_validator(self, attribute, value):
     # deferred import: keeps this schema module import-light; fires at
     # attrs instantiation (OmegaConf.to_object), long after import time
@@ -85,6 +93,29 @@ class ConfigSchema:
     )
     animation_mode: str = field(
         default="off", validator=_choice(["off", "2D", "3D", "Video Source"])
+    )
+
+    # Init-noise spectrum for the no-init_image start (encode_random; with an
+    # init_image this knob is never consulted). white = the historical iid
+    # uniform noise, bit-for-bit. gray = mid-gray + one-bit symmetry-breaking
+    # noise. pink = FFT-shaped 1/f^alpha-amplitude gaussian noise (natural
+    # images live near alpha 1). fractal = multi-octave pyramid noise, a
+    # second power-law family with no FFT. Shaped fields match the white
+    # init's moments (mean 0.5, std 1/sqrt(12), clamped to [0,1]) on the
+    # logical grid, per channel / palette plane. Limited Palette shapes both
+    # the value plane and the palette-selection logits; Unlimited Palette
+    # shapes RGB. VQGAN/LlamaGen random init is a categorical codebook draw —
+    # no spectrum to shape — so any non-white value fails loudly there.
+    init_spectrum: str = field(
+        default="white",
+        validator=_choice(["white", "gray", "pink", "fractal"]),
+    )
+    # amplitude decay power alpha for init_spectrum=pink: amplitude ~
+    # 1/f^alpha, so alpha 1 => the natural ~1/f^2 POWER spectrum; higher =
+    # smoother/cloudier, lower = closer to white. Validated to [0, 8]
+    # (init_noise.MAX_SPECTRUM_FALLOFF) at compose time.
+    init_spectrum_falloff: float = field(
+        default=1.0, validator=_init_spectrum_falloff_validator
     )
 
     width: int = 512

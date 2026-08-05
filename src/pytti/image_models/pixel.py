@@ -11,6 +11,7 @@ from torchvision.transforms import functional as TF
 from pytti import named_rearrange, replace_grad, vram_usage_mode
 from pytti.device import default_device, memory_format_for
 from pytti.image_models.differentiable_image import DifferentiableImage
+from pytti.image_models.init_noise import shaped_init_field
 from pytti.LossAug.HSVLossClass import HSVLoss
 
 
@@ -480,14 +481,38 @@ class PixelImage(DifferentiableImage):
                 self.hdr_loss.set_weight(before_weight)
 
     @torch.no_grad()
-    def encode_random(self, random_palette=False):
+    def encode_random(
+        self, random_palette=False, init_spectrum="white", init_spectrum_falloff=1.0
+    ):
         """
-        Sets the value and palette to random values (uniform noise).
+        Sets the value and tensor to random noise shaped per config
+        ``init_spectrum`` (see image_models/init_noise.py). 'white' keeps
+        the original in-place uniform draws bit-for-bit. Shaped spectra
+        draw one field for the value plane (the brightness that is visible
+        at step 0) and an independent field per palette plane for the
+        selection logits — spatially-coherent palette regions instead of
+        per-pixel salt.
 
         :param random_palette: If True, the palette is initialized to random values, defaults to False
         (optional)
         """
-        self.value.uniform_()
-        self.tensor.uniform_()
+        if init_spectrum == "white":
+            self.value.uniform_()
+            self.tensor.uniform_()
+        else:
+            height, width = self.value.shape
+            value_field = shaped_init_field(
+                1, height, width, init_spectrum, init_spectrum_falloff, self.device
+            )
+            self.value.copy_(value_field.squeeze(0))
+            logit_fields = shaped_init_field(
+                self.n_palettes,
+                height,
+                width,
+                init_spectrum,
+                init_spectrum_falloff,
+                self.device,
+            )
+            self.tensor.copy_(logit_fields)
         if random_palette:
             self.palette.uniform_(to=self.palette_inertia)

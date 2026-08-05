@@ -28,6 +28,7 @@ from pytti import (
 )
 from pytti.config.model_names import LLAMAGEN_CHECKPOINT_FILES, LLAMAGEN_MODEL_NAMES
 from pytti.image_models import EMAImage
+from pytti.image_models.init_noise import require_white_init
 from pytti.image_models.vqgan import vector_quantize
 
 # One revision pin for the whole repo: every checkpoint file above is
@@ -180,7 +181,8 @@ class LlamaGenImage(EMAImage):
         return z_q
 
     @torch.no_grad()
-    def encode_random(self):
+    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+        require_white_init("LlamaGenImage", init_spectrum)
         self.tensor.set_(self.rand_latent())
         self.reset()
 

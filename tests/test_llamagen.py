@@ -193,7 +193,14 @@ def test_workhorse_rejects_llamagen_on_mlx_backends():
     from pytti.workhorse import configure_pass
 
     for backend in ("mlx", "mlx_full"):
-        params = SimpleNamespace(image_model="LlamaGen", perceptor_backend=backend)
+        # minimal stub of the schema fields configure_pass reads before the
+        # backend check: the init_spectrum resolve happens at function top
+        params = SimpleNamespace(
+            image_model="LlamaGen",
+            perceptor_backend=backend,
+            init_spectrum="white",
+            init_spectrum_falloff=1.0,
+        )
         with pytest.raises(ValueError, match="torch-only"):
             configure_pass(
                 params,

@@ -7,6 +7,7 @@ from torchvision.transforms import functional as TF
 from pytti import clamp_with_grad
 from pytti.device import default_device
 from pytti.image_models import DifferentiableImage
+from pytti.image_models.init_noise import shaped_init_field
 
 
 class RGBImage(DifferentiableImage):
@@ -60,5 +61,18 @@ class RGBImage(DifferentiableImage):
         )
 
     @torch.no_grad()
-    def encode_random(self):
-        self.tensor.uniform_()
+    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+        """
+        Overwrite the image with noise shaped per config ``init_spectrum``
+        (see image_models/init_noise.py). 'white' keeps the original
+        in-place uniform draw bit-for-bit; the shaped spectra draw an
+        independent field per RGB channel on the logical grid.
+        """
+        if init_spectrum == "white":
+            self.tensor.uniform_()
+            return
+        height, width = self.tensor.shape[-2:]
+        field = shaped_init_field(
+            3, height, width, init_spectrum, init_spectrum_falloff, self.device
+        )
+        self.tensor.copy_(field.unsqueeze(0))

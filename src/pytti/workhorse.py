@@ -49,6 +49,7 @@ from pytti.image_models import (
     RGBImage,
     VQGANImage,
 )
+from pytti.image_models.init_noise import require_white_init, resolve_init_spectrum
 from pytti.ImageGuide import DirectImageGuide
 from pytti.LossAug.LossOrchestratorClass import (
     configure_init_image,
@@ -246,6 +247,18 @@ def configure_pass(
     re-fitting a palette from scratch. A user-locked palette stays locked to
     the carried colors; an unlocked one resumes learning after the fit.
     """
+    # The init_spectrum knob only governs a visible random start: with an
+    # init_image (encoded over the random init in configure_init_image
+    # below) or a restore (state reloaded from the .bak) it resolves to the
+    # plain white draw — no wasted shaping, and no spurious VQGAN/LlamaGen
+    # rejection of a start that is never shown.
+    init_spectrum, init_spectrum_falloff = resolve_init_spectrum(
+        params.init_spectrum,
+        params.init_spectrum_falloff,
+        has_init_image=init_image_pil is not None,
+        restore=restore,
+    )
+
     # set up image
     if params.image_model == "Limited Palette":
         img = PixelImage(
@@ -259,7 +272,11 @@ def configure_pass(
             norm_weight=params.palette_normalization_weight,
             device=device,
         )
-        img.encode_random(random_palette=params.random_initial_palette)
+        img.encode_random(
+            random_palette=params.random_initial_palette,
+            init_spectrum=init_spectrum,
+            init_spectrum_falloff=init_spectrum_falloff,
+        )
         if params.target_palette.strip() != "":
             img.set_palette_target(
                 Image.open(fetch(params.target_palette)).convert("RGB")
@@ -268,8 +285,15 @@ def configure_pass(
             img.lock_palette(params.lock_palette)
     elif params.image_model == "Unlimited Palette":
         img = RGBImage(params.width, params.height, params.pixel_size, device=device)
-        img.encode_random()
+        img.encode_random(
+            init_spectrum=init_spectrum,
+            init_spectrum_falloff=init_spectrum_falloff,
+        )
     elif params.image_model == "VQGAN":
+        # categorical token init has no spectrum to shape: reject a shaped
+        # (and visible — see resolve above) init BEFORE the multi-GB model
+        # download/load; encode_random repeats the same guard for direct use
+        require_white_init("VQGANImage", init_spectrum)
         # namespaced cache (~/.cache/pytti/vqgan); fall back to the legacy
         # un-namespaced location if it already holds downloads
         model_artifacts_path = Path(params.models_parent_dir) / "pytti" / "vqgan"
@@ -278,7 +302,10 @@ def configure_pass(
             model_artifacts_path = legacy_path
         VQGANImage.init_vqgan(params.vqgan_model, model_artifacts_path, device=device)
         img = VQGANImage(params.width, params.height, params.pixel_size, device=device)
-        img.encode_random()
+        img.encode_random(
+            init_spectrum=init_spectrum,
+            init_spectrum_falloff=init_spectrum_falloff,
+        )
     elif params.image_model == "LlamaGen":
         if params.perceptor_backend != "torch":
             raise ValueError(
@@ -286,12 +313,19 @@ def configure_pass(
                 f"{params.perceptor_backend!r} does not support it. "
                 "Use perceptor_backend=torch."
             )
+        # categorical token init has no spectrum to shape: reject a shaped
+        # (and visible — see resolve above) init BEFORE the model
+        # download/load; encode_random repeats the same guard for direct use
+        require_white_init("LlamaGenImage", init_spectrum)
         # weights land in the HF hub cache, revision-pinned + sha-verified
         LlamaGenImage.init_llamagen(params.llamagen_model, device=device)
         img = LlamaGenImage(
             params.width, params.height, params.pixel_size, device=device
         )
-        img.encode_random()
+        img.encode_random(
+            init_spectrum=init_spectrum,
+            init_spectrum_falloff=init_spectrum_falloff,
+        )
     else:
         raise ValueError(
             f"Unrecognized image_model: {params.image_model!r}. "

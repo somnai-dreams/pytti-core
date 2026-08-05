@@ -19,6 +19,7 @@ from pytti import (
 )
 from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 from pytti.image_models import EMAImage
+from pytti.image_models.init_noise import require_white_init
 
 VQGAN_MODEL = None
 VQGAN_NAME = None
@@ -267,7 +268,8 @@ class VQGANImage(EMAImage):
         return z_q
 
     @torch.no_grad()
-    def encode_random(self):
+    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+        require_white_init("VQGANImage", init_spectrum)
         self.tensor.set_(self.rand_latent())
         self.reset()
 
