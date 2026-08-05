@@ -19,7 +19,7 @@ seam map draws:
   torch-serialized and ``restore=True`` round-trips (gate c).
 
 Eligibility is validated LOUDLY at construction (seam map §4 "Proposed M2
-torch boundary"): still mode, PixelImage/RGBImage, batched|smart sampler,
+torch boundary"): still mode, PixelImage/RGBImage, batched|smart|full sampler,
 plain Adam, and no semantic-mask / semantic-image-prompt / depth / video
 features — each rejection names the backend that does support the config.
 The torch and M1-mlx paths are untouched.
@@ -277,11 +277,11 @@ class MLXStillEngine:
                 "(PixelImage/RGBImage only)",
                 "Use perceptor_backend=mlx for VQGAN, torch for LlamaGen.",
             )
-        if embedder.cutout_sampler not in ("batched", "smart"):
+        if embedder.cutout_sampler not in ("batched", "smart", "full"):
             raise _reject(
                 f"cutout_sampler={embedder.cutout_sampler!r}",
                 "The classic sampler is torch-only: use cutout_sampler="
-                "batched|smart, or perceptor_backend=torch.",
+                "batched|smart|full, or perceptor_backend=torch.",
             )
         if params.optimizer != "adam":
             raise _reject(

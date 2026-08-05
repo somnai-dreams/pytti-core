@@ -1,10 +1,10 @@
 """
 MLX cutout samplers — M2 slice S3 (docs/mlx-m2-seam-map.md, Stage D).
 
-Ports of ``pytti.Perceptor.cutouts.samplers.pytti_batched`` and
-``pytti_smart`` (the torch code is the source of truth — every formula here
-is a line-for-line transcription), plus the Embedder-side border pre-pad and
-a differentiable pure-ops ``grid_sample``. Parity is gated in
+Ports of ``pytti.Perceptor.cutouts.samplers.pytti_batched``,
+``pytti_smart``, and ``pytti_full`` (the torch code is the source of truth —
+every formula here is a line-for-line transcription), plus the Embedder-side
+border pre-pad and a differentiable pure-ops ``grid_sample``. Parity is gated in
 ``tests/test_mlx_engine_sampler.py``: cutout values <= 2/255 vs torch,
 input-grad rel <= 1e-5 fp32, coordinate-convention equality, distribution
 sanity per population.
@@ -420,6 +420,35 @@ def _stratified_cells(
     return x_lo, x_width, y_lo, y_height
 
 
+def _inscribed_anchors(
+    n: int, side_x: int, side_y: int, k_x: mx.array | None, k_y: mx.array | None
+) -> tuple[mx.array, mx.array, mx.array]:
+    """
+    ``samplers._inscribed_anchors`` verbatim: ``n`` full-frame anchor cuts —
+    every size exactly the inscribed square, positions stratified along the
+    free axis (evenly spaced lanes + uniform jitter; the degenerate axis of
+    a square canvas yields all-zero offsets naturally), always inside the
+    unpadded frame. Shared by ``pytti_smart`` (its global-anchor population)
+    and ``pytti_full`` (anchors at n == cutn). Draws x jitter then y jitter
+    on ``k_x``/``k_y``. Returns (sizes_px, offsetx, offsety), each ``[n]``
+    fp32.
+    """
+    if n < 1:
+        raise ValueError(f"_inscribed_anchors needs n >= 1, got {n}")
+    max_size = min(side_x, side_y)
+    sizes = mx.full((n,), max_size, dtype=mx.float32)
+    free_x = side_x - max_size
+    free_y = side_y - max_size
+    lane = mx.arange(n, dtype=mx.float32)
+    offx = mx.floor(
+        (lane + mx.random.uniform(shape=(n,), key=k_x)) * (free_x / n)
+    )
+    offy = mx.floor(
+        (lane + mx.random.uniform(shape=(n,), key=k_y)) * (free_y / n)
+    )
+    return sizes, offx, offy
+
+
 def pytti_smart(
     input: mx.array,
     side_x: int,
@@ -468,19 +497,8 @@ def pytti_smart(
     n_detail = cutn - n_global
     k_gx, k_gy, k_u, k_perm, k_tx, k_ty, k_fac, k_noise = _split_keys(key, 8)
 
-    # --- population 1: global anchors --------------------------------------
-    # Inscribed squares stratified along the free axis; the degenerate axis
-    # (free == 0) yields all-zero offsets naturally.
-    g_sizes = mx.full((n_global,), max_size, dtype=mx.float32)
-    free_x = side_x - max_size
-    free_y = side_y - max_size
-    lane = mx.arange(n_global, dtype=mx.float32)
-    g_offx = mx.floor(
-        (lane + mx.random.uniform(shape=(n_global,), key=k_gx)) * (free_x / n_global)
-    )
-    g_offy = mx.floor(
-        (lane + mx.random.uniform(shape=(n_global,), key=k_gy)) * (free_y / n_global)
-    )
+    # --- population 1: global anchors (shared with pytti_full) -------------
+    g_sizes, g_offx, g_offy = _inscribed_anchors(n_global, side_x, side_y, k_gx, k_gy)
 
     # --- population 2: stratified detail -----------------------------------
     u = mx.random.uniform(shape=(n_detail,), key=k_u)
@@ -517,6 +535,65 @@ def pytti_smart(
         mx.concatenate([g_sizes, d_sizes]),
         mx.concatenate([g_offx, d_offx]),
         mx.concatenate([g_offy, d_offy]),
+        side_x=side_x,
+        side_y=side_y,
+        cut_size=cut_size,
+        paddingx=paddingx,
+        paddingy=paddingy,
+        border_mode=border_mode,
+    )
+    cutouts = augs(cutouts)
+    if noise_fac:
+        cutouts = _apply_noise(cutouts, noise_fac, k_fac, k_noise)
+    return cutouts, offsets, sizes
+
+
+def pytti_full(
+    input: mx.array,
+    side_x: int,
+    side_y: int,
+    cut_size: int,
+    padding: float,
+    cutn: int,
+    cut_pow: float,
+    border_mode: str,
+    augs,
+    noise_fac: float,
+    key: mx.array | None = None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """
+    MLX port of ``samplers.pytti_full`` (the torch code is the source of
+    truth): full-vision sampling — EVERY cutout is the full inscribed square
+    (``size == min(side_x, side_y)`` exactly), i.e. ``pytti_smart``'s
+    global-anchor population at ``n_global == cutn`` via the shared
+    ``_inscribed_anchors``. Square canvas: all offsets 0 (identical crops
+    pre-aug; augs + noise are the diversity source). Non-square: offsets
+    stratified along the free axis, always inside the unpadded frame. Same
+    input / return / border-mode contract as ``pytti_batched``;
+    ``cut_pow`` accepted but UNUSED (one size only); ``cutn >= 1``. The
+    sampler choice is a trace-time constant like the others — in-graph
+    geometry is pure ops, no host syncs, no retrace.
+
+    Draw order (== subkey order under an explicit key):
+    1. anchor x jitter ~ U[0,1) [cutn]   2. anchor y jitter [cutn]
+    3. noise facs ~ U[0, noise_fac)      4. noise field ~ N(0, 1)
+    (3-4 only drawn when noise_fac)
+    """
+    if cutn < 1:
+        raise ValueError(f"pytti_full needs cutn >= 1, got {cutn}")
+    paddingx = min(round(side_x * padding), side_x)
+    paddingy = min(round(side_y * padding), side_y)
+    _validate_sampler_input(
+        "pytti_full", input, side_x, side_y, paddingx, paddingy, border_mode
+    )
+    k_gx, k_gy, k_fac, k_noise = _split_keys(key, 4)
+
+    sizes_px, offsetx, offsety = _inscribed_anchors(cutn, side_x, side_y, k_gx, k_gy)
+    cutouts, offsets, sizes = _cut_batch(
+        input,
+        sizes_px,
+        offsetx,
+        offsety,
         side_x=side_x,
         side_y=side_y,
         cut_size=cut_size,

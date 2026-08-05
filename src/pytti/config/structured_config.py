@@ -273,9 +273,17 @@ class ConfigSchema:
     # at cutn 16 it BEAT batched@40 on held-out ViT-L/14 adherence
     # (0.375 vs 0.366) at ~2.3x less tower compute. batched = classic's
     # distribution in one grid_sample (wants cutn ~40); classic = the
-    # original 2021 per-crop loop, kept as the legacy preset
+    # original 2021 per-crop loop, kept as the legacy preset.
+    # full = exclusively full vision: EVERY cutout is the full inscribed
+    # square (smart's anchor population at n_global == cutn) — no cut
+    # smaller than 100% resolution. On a square canvas every view is the
+    # SAME crop augmented (augs + noise_fac are the diversity source), so
+    # the designed pairing is LOW cutn: 8-16 is the sensible band. With
+    # coherence_weighting an all-anchor batch renormalizes to exactly
+    # uniform — a harmless no-op (test_coherence_weighting.py::
+    # test_all_anchor_batch_is_exactly_uniform).
     cutout_sampler: str = field(
-        default="smart", validator=_choice(["classic", "batched", "smart"])
+        default="smart", validator=_choice(["classic", "batched", "smart", "full"])
     )
     # Coherence weighting: redistribute per-cutout SEMANTIC-loss weight by
     # view size. With uniform weights ~75% of the semantic gradient pushes

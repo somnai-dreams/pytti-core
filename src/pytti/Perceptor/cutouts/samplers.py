@@ -295,6 +295,44 @@ def _stratified_cells(
     return x_lo, x_width, y_lo, y_height
 
 
+def _inscribed_anchors(
+    n: int, side_x, side_y, device, dtype
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    `n` full-frame anchor cuts: every size is EXACTLY the inscribed square
+    (min(side_x, side_y)) and positions are stratified along the free axis
+    (evenly spaced lanes + uniform jitter within each). Exactly one of
+    free_x/free_y is nonzero on a non-square canvas (both 0 when square), so
+    one code path covers both: the degenerate axis yields all-zero offsets
+    naturally. Offsets stay inside the unpadded frame for every border mode
+    (a full-frame view of padding is not a view of the image).
+
+    This is `pytti_smart`'s global-anchor population, factored so
+    `pytti_full` (anchors at n == cutn) shares it verbatim. Draws 2 RNG
+    vectors (x jitter, then y jitter), both `[n]` on `device`.
+
+    Returns (sizes_px, offsetx, offsety), each `[n]`.
+    """
+    if n < 1:
+        raise ValueError(f"_inscribed_anchors needs n >= 1, got {n}")
+    max_size = min(side_x, side_y)
+    sizes = torch.full((n,), max_size, device=device, dtype=dtype)
+    free_x = side_x - max_size
+    free_y = side_y - max_size
+    lane = torch.arange(n, device=device, dtype=dtype)
+    offx = (
+        (lane + torch.rand(n, device=device, dtype=dtype))
+        .mul_(free_x / n)
+        .floor_()
+    )
+    offy = (
+        (lane + torch.rand(n, device=device, dtype=dtype))
+        .mul_(free_y / n)
+        .floor_()
+    )
+    return sizes, offx, offy
+
+
 def pytti_smart(
     input: torch.Tensor,
     side_x,
@@ -370,24 +408,9 @@ def pytti_smart(
     n_global = max(2, round(cutn * 0.25))
     n_detail = cutn - n_global
 
-    # --- population 1: global anchors -------------------------------------
-    # Inscribed squares stratified along the free axis. Exactly one of
-    # free_x/free_y is nonzero on a non-square canvas (both 0 when square),
-    # so one code path covers both: the degenerate axis yields all-zero
-    # offsets naturally.
-    g_sizes = torch.full((n_global,), max_size, device=device, dtype=dtype)
-    free_x = side_x - max_size
-    free_y = side_y - max_size
-    lane = torch.arange(n_global, device=device, dtype=dtype)
-    g_offx = (
-        (lane + torch.rand(n_global, device=device, dtype=dtype))
-        .mul_(free_x / n_global)
-        .floor_()
-    )
-    g_offy = (
-        (lane + torch.rand(n_global, device=device, dtype=dtype))
-        .mul_(free_y / n_global)
-        .floor_()
+    # --- population 1: global anchors (shared with pytti_full) ------------
+    g_sizes, g_offx, g_offy = _inscribed_anchors(
+        n_global, side_x, side_y, device, dtype
     )
 
     # --- population 2: stratified detail -----------------------------------
@@ -427,6 +450,84 @@ def pytti_smart(
     sizes_px = torch.cat([g_sizes, d_sizes])
     offsetx = torch.cat([g_offx, d_offx])
     offsety = torch.cat([g_offy, d_offy])
+    if border_mode == "clamp":
+        x0, y0 = offsetx, offsety
+    else:
+        x0, y0 = offsetx + paddingx, offsety + paddingy  # shift into padded coords
+
+    grid = _affine_crop_grid(x0, y0, sizes_px, input.shape[1], cut_size, in_h, in_w)
+    cutouts = F.grid_sample(
+        input.expand(cutn, -1, -1, -1),  # expand: view, no copy
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )
+    offsets = torch.stack([offsetx / side_x, offsety / side_y], dim=-1)
+    sizes = torch.stack([sizes_px / side_x, sizes_px / side_y], dim=-1)
+
+    cutouts = augs(cutouts)
+    if noise_fac:
+        facs = cutouts.new_empty([cutn, 1, 1, 1]).uniform_(0, noise_fac)
+        cutouts.add_(facs * torch.randn_like(cutouts))
+    return cutouts, offsets, sizes
+
+
+def pytti_full(
+    input: torch.Tensor,
+    side_x,
+    side_y,
+    cut_size,
+    padding,
+    cutn,
+    cut_pow,
+    border_mode,
+    augs,
+    noise_fac,
+    device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Full-vision sampler: EVERY cutout is the full inscribed square
+    (size == max_size == min(side_x, side_y) exactly — `pytti_smart`'s
+    global-anchor population at n_global == cutn; `_inscribed_anchors` is
+    shared, not duplicated). No cut smaller than 100% resolution ever.
+
+    Square canvas: all offsets are 0, so the crops are IDENTICAL pre-aug —
+    the augs + noise_fac are the designed diversity source, exactly like
+    smart's anchors. Non-square canvas: offsets stratified along the free
+    axis (evenly spaced lanes + uniform jitter), always inside the unpadded
+    frame regardless of border mode.
+
+    Same signature, input contract, and return convention as
+    `pytti_batched`/`pytti_smart` (pre-padded input for non-clamp border
+    modes; offsets/sizes `[cutn, 2]` normalized by `(side_x, side_y)`; augs
+    + noise applied last; NO host syncs). `cut_pow` is accepted for
+    signature compatibility but UNUSED (it shapes the classic size
+    distribution — here there is exactly one size). Works at any
+    `cutn >= 1`; the designed pairing is LOW cutn (~8-16).
+    """
+    if input.ndim != 4 or input.shape[0] != 1:
+        raise ValueError(
+            f"pytti_full expects a single-image batch [1, C, H, W], got {tuple(input.shape)}"
+        )
+    if cutn < 1:
+        raise ValueError(f"pytti_full needs cutn >= 1, got {cutn}")
+    dtype = input.dtype
+    paddingx = min(round(side_x * padding), side_x)
+    paddingy = min(round(side_y * padding), side_y)
+    if border_mode == "clamp":
+        in_h, in_w = side_y, side_x
+    else:
+        in_h, in_w = side_y + 2 * paddingy, side_x + 2 * paddingx
+    if input.shape[-2:] != (in_h, in_w):
+        raise ValueError(
+            f"pytti_full: border_mode={border_mode!r} expects input {(in_h, in_w)} "
+            f"(pre-padded unless 'clamp'), got {tuple(input.shape[-2:])}"
+        )
+
+    sizes_px, offsetx, offsety = _inscribed_anchors(
+        cutn, side_x, side_y, device, dtype
+    )
     if border_mode == "clamp":
         x0, y0 = offsetx, offsety
     else:

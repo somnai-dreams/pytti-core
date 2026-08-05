@@ -69,11 +69,16 @@ from pytti.mlx_engine.losses import (
     mse_loss,
     tv_loss,
 )
-from pytti.mlx_engine.sampler import pad_image, pytti_batched, pytti_smart
+from pytti.mlx_engine.sampler import (
+    pad_image,
+    pytti_batched,
+    pytti_full,
+    pytti_smart,
+)
 from pytti.Perceptor.mlx_backend.bridge import mlx_semantic_reduction
 
 IMAGE_KINDS = ("pixel", "rgb")
-SAMPLERS = {"batched": pytti_batched, "smart": pytti_smart}
+SAMPLERS = {"batched": pytti_batched, "smart": pytti_smart, "full": pytti_full}
 DIRECT_LOSS_KINDS = ("tv", "mse", "hsv", "edge")
 # geometric mask keys (prompt_spec.GEOMETRIC_MASK_KEYS): "a" == mask_all
 MASK_KINDS = ("a", "r", "l", "d", "u", "n", "f")
@@ -188,7 +193,7 @@ class StepConfig:
     padding: float
     border_mode: str
     noise_fac: float
-    sampler: str  # "batched" | "smart"
+    sampler: str  # "batched" | "smart" | "full"
     gas: int  # gradient_accumulation_steps
     # config coherence_weighting: per-cutout semantic weights from crop
     # geometry (sizes_to_coherence_weights). Trace-time constant BY DESIGN:

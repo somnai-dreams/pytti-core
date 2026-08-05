@@ -475,6 +475,18 @@ class TestEngineAssembly:
         ]
         assert all(math.isfinite(float(r["TOTAL"])) for r in records)
 
+    def test_full_sampler_runs_and_descends(self):
+        """cutout_sampler=full through the whole compiled step: accepted by
+        the eligibility gate, TOTAL finite and descending — the full-vision
+        batch (identical crops pre-aug on this square-free stub canvas)
+        still produces a usable gradient because augs + noise diversify."""
+        engine = _make_engine(embedder=StubEmbedder(sampler="full"))
+        assert engine._base_cfg["sampler"] == "full"
+        records = self._run(engine, steps=5)
+        totals = [float(r["TOTAL"]) for r in records]
+        assert all(math.isfinite(v) for v in totals)
+        assert min(totals[1:]) < totals[0]
+
     def test_mixed_stats_ensemble_shares_sampler_group(self):
         """The FARE + SigLIP2 ensemble shape: same input resolution,
         DIFFERENT normalization stats, different embedding widths. The
@@ -638,6 +650,21 @@ COH_SIZES = np.array([128, 128, 96, 64, 48, 80, 56, 112], dtype=np.float32)
 COH_OX = np.array([0, 0, 20, 60, 75, 20, 33, 5], dtype=np.float32)
 COH_OY = np.array([0, 0, 5, 33, 41, 12, 60, 16], dtype=np.float32)
 
+# cutout_sampler=full geometry: EVERY row is the exact inscribed square at
+# offset 0 — the full-vision sampler's square-canvas draw (identical crops
+# pre-aug; the replayed augs are the only diversity). Paired with
+# coherence_weighting=true this exercises the all-anchor uniform no-op
+# across both backends.
+FULL_SIZES = np.full(8, 128, dtype=np.float32)
+FULL_OX = np.zeros(8, dtype=np.float32)
+FULL_OY = np.zeros(8, dtype=np.float32)
+
+GEOMETRIES = {
+    "geo": (GEO_SIZES, GEO_OX, GEO_OY),
+    "coh": (COH_SIZES, COH_OX, COH_OY),
+    "full": (FULL_SIZES, FULL_OX, FULL_OY),
+}
+
 
 def _torch_fake_batched(with_augs, geometry=(GEO_SIZES, GEO_OX, GEO_OY)):
     """Deterministic replacement for samplers.pytti_batched: injected
@@ -738,12 +765,11 @@ class TestFullStepParity:
         return reference, candidate
 
     def _torch_step(self, img, embedder, prompts, augs, monkeypatch, gas,
-                    with_augs, coherence=False):
+                    with_augs, coherence=False, geometry_name="geo"):
         from pytti.ImageGuide import DirectImageGuide
         from pytti.Perceptor import Embedder as embedder_module
 
-        geometry = (COH_SIZES, COH_OX, COH_OY) if coherence else \
-            (GEO_SIZES, GEO_OX, GEO_OY)
+        geometry = GEOMETRIES[geometry_name]
         monkeypatch.setitem(
             embedder_module.CUTOUT_SAMPLERS,
             "batched",
@@ -770,12 +796,11 @@ class TestFullStepParity:
         return pre, record, post
 
     def _mlx_step(self, img, embedder, prompts, augs, tower_dtype, gas,
-                  with_augs, coherence=False):
+                  with_augs, coherence=False, geometry_name="geo"):
         from pytti.mlx_engine.engine import MLXStillEngine
         from pytti.mlx_engine.step import trainable_keys_for
 
-        geometry = (COH_SIZES, COH_OX, COH_OY) if coherence else \
-            (GEO_SIZES, GEO_OX, GEO_OY)
+        geometry = GEOMETRIES[geometry_name]
         engine = MLXStillEngine(
             img, embedder, _base_params(coherence_weighting=coherence),
             lr=0.02, tower_dtype=tower_dtype,
@@ -804,23 +829,27 @@ class TestFullStepParity:
     @pytest.mark.parametrize(
         (
             "image_model", "tower_dtype", "gas", "with_augs", "coherence",
-            "gate", "delta_gate", "delta_cos_gate",
+            "geometry_name", "gate", "delta_gate", "delta_cos_gate",
         ),
         [
-            ("pixel", "float32", 1, True, False, 1e-5, 2e-3, 0.99999),
-            ("pixel", "float16", 1, True, False, 1e-2, 2.5e-1, 0.97),
-            ("pixel", "float32", 2, False, False, 1e-5, 2e-3, 0.99999),
-            ("rgb", "float32", 1, True, False, 1e-5, 2e-3, 0.99999),
+            ("pixel", "float32", 1, True, False, "geo", 1e-5, 2e-3, 0.99999),
+            ("pixel", "float16", 1, True, False, "geo", 1e-2, 2.5e-1, 0.97),
+            ("pixel", "float32", 2, False, False, "geo", 1e-5, 2e-3, 0.99999),
+            ("rgb", "float32", 1, True, False, "geo", 1e-5, 2e-3, 0.99999),
             # coherence_weighting gate 2: same fp32 gates as the plain rows,
             # anchor-bearing injected geometry (COH_*) so BOTH halves of the
             # knob (3x anchors + size scaling) cross the backends
-            ("pixel", "float32", 1, False, True, 1e-5, 2e-3, 0.99999),
-            ("rgb", "float32", 1, True, True, 1e-5, 2e-3, 0.99999),
+            ("pixel", "float32", 1, False, True, "coh", 1e-5, 2e-3, 0.99999),
+            ("rgb", "float32", 1, True, True, "coh", 1e-5, 2e-3, 0.99999),
+            # cutout_sampler=full geometry (all-anchor, identical crops
+            # pre-aug) at the established fp32 gates, coherence ON — the
+            # designed full-vision stack, uniform-no-op weights included
+            ("pixel", "float32", 1, True, True, "full", 1e-5, 2e-3, 0.99999),
         ],
     )
     def test_full_step_parity(
         self, clip_embedder, monkeypatch, image_model, tower_dtype, gas,
-        with_augs, coherence, gate, delta_gate, delta_cos_gate,
+        with_augs, coherence, geometry_name, gate, delta_gate, delta_cos_gate,
     ):
         from pytti.Perceptor.Prompt import parse_prompt
 
@@ -838,11 +867,11 @@ class TestFullStepParity:
 
         pre, torch_record, post = self._torch_step(
             reference, clip_embedder, prompts, augs, monkeypatch, gas,
-            with_augs, coherence,
+            with_augs, coherence, geometry_name,
         )
         mlx_record, engine, trainable = self._mlx_step(
             candidate, clip_embedder, prompts, augs, tower_dtype, gas,
-            with_augs, coherence,
+            with_augs, coherence, geometry_name,
         )
 
         assert set(mlx_record) == set(torch_record)

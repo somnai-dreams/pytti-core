@@ -27,6 +27,7 @@ CUTOUT_SAMPLERS = {
     "classic": cutouts_samplers.pytti_classic,
     "batched": cutouts_samplers.pytti_batched,
     "smart": cutouts_samplers.pytti_smart,
+    "full": cutouts_samplers.pytti_full,
 }
 
 

@@ -355,7 +355,9 @@ def test_injected_geometry_input_grad_parity(border_mode):
 
 
 @pytest.mark.parametrize("border_mode", ["clamp", "smear"])
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_full_sampler_value_parity(sampler_name, border_mode):
     mx, _ = _mlx()
     side_x, side_y, cut_size, cutn, padding = 97, 65, 32, 32, 0.25
@@ -382,7 +384,9 @@ def test_full_sampler_value_parity(sampler_name, border_mode):
     assert diff < VALUE_GATE, f"{sampler_name} value diff {diff} >= 2/255"
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_offset_size_semantics_clamp(sampler_name):
     """Torch samplers' coordinate convention: offsets are the crop's top-left
     corner in raw-image pixels normalized by (side_x, side_y). cut_size ==
@@ -669,6 +673,139 @@ def test_smart_detail_stratification_covers_every_cell(border_mode):
         )
 
 
+# ---------------------------------------------------------------------------
+# pytti_full: full-vision distribution sanity (mirrors test_full_sampler.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("border_mode", ["clamp", "smear"])
+@pytest.mark.parametrize("cutn", [1, 8, 16])
+def test_full_vision_every_size_is_max_size(border_mode, cutn):
+    mx, mxs = _mlx()
+    side_x, side_y, cut_size, padding = 96, 64, 8, 0.25
+    torch.manual_seed(20)
+    raw = torch.rand(1, 3, side_y, side_x)
+    input_m = mxs.pad_image(to_mx_nhwc(raw), side_x, side_y, padding, border_mode)
+    cutouts, offsets, sizes = _run_sampler(
+        "pytti_full",
+        input_m,
+        side_x=side_x,
+        side_y=side_y,
+        cut_size=cut_size,
+        cutn=cutn,
+        border_mode=border_mode,
+        key=mx.random.key(20),
+    )
+    assert cutouts.shape == (cutn, cut_size, cut_size, 3)
+    sizes_t = to_torch(sizes)
+    ox, oy, sz = _int_coords(to_torch(offsets), sizes_t, side_x, side_y)
+    max_size = min(side_x, side_y)  # 64
+    assert (sz == max_size).all()  # no cut below 100% resolution, ever
+    # min-side size column reads exactly 1.0: the coherence-weighting anchor
+    # detector (sizes_to_coherence_weights) fires on every row
+    assert (sizes_t[:, 1] == 1.0).all()
+    # offsets stay inside the unpadded frame on EVERY border mode
+    assert (ox >= 0).all() and (ox + max_size <= side_x).all()
+    assert (oy == 0).all()  # free_y == 0 on this landscape canvas
+
+
+def test_full_vision_square_canvas_identical():
+    mx, _ = _mlx()
+    side = 64
+    torch.manual_seed(21)
+    raw = torch.rand(1, 3, side, side)
+    cutouts, offsets, sizes = _run_sampler(
+        "pytti_full",
+        to_mx_nhwc(raw),
+        side_x=side,
+        side_y=side,
+        cut_size=8,
+        cutn=12,
+        key=mx.random.key(21),
+    )
+    offsets_t = to_torch(offsets)
+    assert (offsets_t == 0).all()
+    _, _, sz = _int_coords(offsets_t, to_torch(sizes), side, side)
+    assert (sz == side).all()
+    cut_t = to_torch(cutouts)
+    for i in range(1, 12):
+        assert torch.equal(cut_t[0], cut_t[i])
+
+
+@pytest.mark.parametrize("side_x,side_y,free_axis", [(128, 64, "x"), (64, 128, "y")])
+def test_full_vision_offsets_stratified_along_free_axis(side_x, side_y, free_axis):
+    mx, _ = _mlx()
+    cutn = 8
+    torch.manual_seed(22)
+    raw = torch.rand(1, 3, side_y, side_x)
+    _, offsets, sizes = _run_sampler(
+        "pytti_full",
+        to_mx_nhwc(raw),
+        side_x=side_x,
+        side_y=side_y,
+        cut_size=8,
+        cutn=cutn,
+        key=mx.random.key(22),
+    )
+    ox, oy, sz = _int_coords(to_torch(offsets), to_torch(sizes), side_x, side_y)
+    max_size = min(side_x, side_y)
+    assert (sz == max_size).all()
+    free = max(side_x, side_y) - max_size  # 64
+    strat, fixed = (ox, oy) if free_axis == "x" else (oy, ox)
+    assert (fixed == 0).all()
+    lane_w = free / cutn
+    for i in range(cutn):
+        v = strat[i].item()
+        assert i * lane_w - FLOOR_SLACK < v < (i + 1) * lane_w + 1e-3, (
+            f"anchor {i} at {v} outside its lane [{i * lane_w}, {(i + 1) * lane_w})"
+        )
+
+
+def test_full_vision_padded_never_reaches_padding():
+    """Unlike batched/smart detail cuts, full-vision crops never reach into
+    the padding — smart's anchor rule applied to every row. cut_size ==
+    max_size makes resampling the identity, so each cutout must equal the
+    RAW pixels at the reported (non-negative) offset."""
+    mx, mxs = _mlx()
+    side_x, side_y, cut_size, cutn, padding = 64, 32, 32, 12, 0.25
+    torch.manual_seed(23)
+    raw = torch.rand(1, 3, side_y, side_x)
+    padded_m = mxs.pad_image(to_mx_nhwc(raw), side_x, side_y, padding, "smear")
+    cutouts, offsets, sizes = _run_sampler(
+        "pytti_full",
+        padded_m,
+        side_x=side_x,
+        side_y=side_y,
+        cut_size=cut_size,
+        cutn=cutn,
+        border_mode="smear",
+        key=mx.random.key(23),
+    )
+    ox, oy, sz = _int_coords(to_torch(offsets), to_torch(sizes), side_x, side_y)
+    assert (sz == 32).all()
+    assert (ox >= 0).all() and (ox + 32 <= side_x).all()
+    assert (oy == 0).all()
+    cut_t = to_torch_nchw(cutouts)
+    for i in range(cutn):
+        x, y = ox[i].item(), oy[i].item()
+        assert torch.allclose(
+            cut_t[i], raw[0, :, y : y + 32, x : x + 32], atol=1e-4
+        ), f"cutout {i} reached outside the unpadded frame at ({x}, {y})"
+
+
+def test_full_rejects_cutn_below_one():
+    mx, _ = _mlx()
+    with pytest.raises(ValueError, match="cutn >= 1"):
+        _run_sampler(
+            "pytti_full",
+            mx.zeros((1, 32, 32, 3)),
+            side_x=32,
+            side_y=32,
+            cut_size=16,
+            cutn=0,
+        )
+
+
 @pytest.mark.parametrize(
     "n_cells,n_rows", [(1, 1), (2, 1), (5, 2), (12, 3), (13, 4), (30, 5)]
 )
@@ -741,7 +878,9 @@ def test_pad_image_fail_loud():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_explicit_key_is_pure_and_deterministic(sampler_name):
     mx, _ = _mlx()
     torch.manual_seed(14)
@@ -771,7 +910,9 @@ def test_explicit_key_is_pure_and_deterministic(sampler_name):
     assert mx.array_equal(s1, s4).item()
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_implicit_state_is_seedable_and_advances(sampler_name):
     mx, _ = _mlx()
     torch.manual_seed(15)
@@ -788,7 +929,9 @@ def test_implicit_state_is_seedable_and_advances(sampler_name):
     assert not mx.array_equal(o1, o1b).item() or not mx.array_equal(c1, c1b).item()
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_implicit_state_compiles(sampler_name):
     """The assembly contract (seam map §3): with ``mx.random.state`` in the
     compiled function's inputs/outputs, implicit-mode draws stay fresh every
@@ -828,7 +971,9 @@ def test_implicit_state_compiles(sampler_name):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_augs_and_noise_are_applied(sampler_name):
     mx, _ = _mlx()
     torch.manual_seed(16)
@@ -850,7 +995,9 @@ def test_augs_and_noise_are_applied(sampler_name):
     assert cut_t.max() < 15.0
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_rejects_batched_input(sampler_name):
     mx, _ = _mlx()
     with pytest.raises(ValueError, match="single-image batch"):
@@ -864,7 +1011,9 @@ def test_rejects_batched_input(sampler_name):
         )
 
 
-@pytest.mark.parametrize("sampler_name", ["pytti_batched", "pytti_smart"])
+@pytest.mark.parametrize(
+    "sampler_name", ["pytti_batched", "pytti_smart", "pytti_full"]
+)
 def test_rejects_unpadded_input_for_padded_mode(sampler_name):
     mx, _ = _mlx()
     with pytest.raises(ValueError, match="pre-padded"):
