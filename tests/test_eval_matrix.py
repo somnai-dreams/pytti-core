@@ -1,8 +1,8 @@
 """
 Unit tests for scripts/eval_matrix.py: battery parse/validation, leg + sweep
-spec parsing (incl. cross-products and name generation), aggregation math on
-synthetic scores, and the dry-run plan snapshot. Pure CPU, no downloads, no
-renders.
+spec parsing (incl. cross-products and name generation), tier plumbing,
+aggregation math on synthetic scores, compare sheets, and the dry-run plan
+snapshots (one per tier). Pure CPU, no downloads, no renders.
 """
 
 import importlib.util
@@ -13,7 +13,10 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SNAPSHOT_PATH = REPO_ROOT / "tests" / "fixtures" / "eval" / "dryrun_plan.snapshot.txt"
+SNAPSHOT_PATHS = {
+    "screening": REPO_ROOT / "tests" / "fixtures" / "eval" / "dryrun_plan.snapshot.txt",
+    "full": REPO_ROOT / "tests" / "fixtures" / "eval" / "dryrun_plan_full.snapshot.txt",
+}
 
 ROBOT_PROMPT = (
     "a full shot of a metallic, silver colored robotic knight standing in a desert"
@@ -274,14 +277,15 @@ def test_assemble_empty_rejected():
 # ----------------------------------------------------------------------
 
 
-def _plan(legs=("default",), sweeps=(), subset=2):
+def _plan(legs=("default",), sweeps=(), subset=2, tier="screening", root=None):
     leg_set = em.assemble_legs(
         [em.parse_leg_spec(spec) for spec in legs],
         None,
         [em.parse_sweep_spec(spec) for spec in sweeps],
     )
     battery = em.parse_battery(em.DEFAULT_BATTERY)
-    return em.build_plan(battery, leg_set, subset)
+    kwargs = {} if root is None else {"root": root}
+    return em.build_plan(battery, leg_set, subset, em.TIERS[tier], **kwargs)
 
 
 def test_plan_cell_count_and_layout():
@@ -292,11 +296,62 @@ def test_plan_cell_count_and_layout():
     assert cell.name == "temple-lit_s2"
     assert (cell.width, cell.height) == (256, 256)
     assert em.final_frame_path(plan, cell) == Path(
-        "/tmp/pytti-eval/default/temple-lit_s2/run/images_out/"
+        "/tmp/pytti-eval/screening/default/temple-lit_s2/run/images_out/"
         "temple-lit_s2/temple-lit_s2_0006.png"
     )
     portrait = next(c for c in plan.cells if c.prompt.aspect == "3:4")
     assert (portrait.width, portrait.height) == (240, 320)
+
+
+# ----------------------------------------------------------------------
+# tiers
+# ----------------------------------------------------------------------
+
+
+def test_tiers_cover_exactly_the_battery_aspects():
+    assert set(em.TIERS) == {"screening", "full"}
+    for tier in em.TIERS.values():
+        assert tuple(tier.dims) == em.ASPECTS
+
+
+def test_full_tier_dims_steps_and_root():
+    plan = _plan(subset=3, tier="full")
+    assert plan.tier.name == "full"
+    cell = plan.cells[0]
+    assert (cell.width, cell.height) == (512, 512)
+    assert cell.steps == 200 and cell.save_every == 25
+    assert cell.final_index == 8
+    # tier-scoped workspace root: screening and full campaigns coexist
+    assert em.final_frame_path(plan, cell) == Path(
+        "/tmp/pytti-eval/full/default/temple-lit_s2/run/images_out/"
+        "temple-lit_s2/temple-lit_s2_0008.png"
+    )
+    portrait = next(c for c in plan.cells if c.prompt.aspect == "3:4")
+    assert (portrait.width, portrait.height) == (448, 576)
+
+
+def test_full_tier_conf_text_carries_tier_budget():
+    plan = _plan(subset=1, tier="full")
+    conf = yaml.safe_load(em.cell_conf_text(plan.cells[0], plan.tier))
+    assert (conf["width"], conf["height"]) == (512, 512)
+    assert conf["steps_per_scene"] == 200 and conf["save_every"] == 25
+
+
+def test_tier_describe_names_dims_and_budget():
+    assert em.TIERS["screening"].describe() == (
+        "screening — 1:1 -> 256x256, 3:4 -> 240x320, "
+        "150 steps, save_every 25, backups 0, schema defaults otherwise"
+    )
+    assert em.TIERS["full"].describe() == (
+        "full — 1:1 -> 512x512, 3:4 -> 448x576, "
+        "200 steps, save_every 25, backups 0, schema defaults otherwise"
+    )
+
+
+def test_leg_step_override_still_beats_tier_default():
+    plan = _plan(legs=("long:steps_per_scene=400",), subset=1, tier="full")
+    assert plan.cells[0].steps == 400
+    assert plan.cells[0].final_index == 16
 
 
 def test_plan_subset_out_of_range_rejected():
@@ -325,7 +380,7 @@ def test_plan_step_save_validation(leg, match):
 def test_cell_conf_text_types_overrides():
     plan = _plan(legs=("full16:cutout_sampler=full,cutouts=16",), subset=1)
     cell = plan.cells[0]
-    conf = yaml.safe_load(em.cell_conf_text(cell))
+    conf = yaml.safe_load(em.cell_conf_text(cell, plan.tier))
     assert conf["scenes"] == cell.prompt.scenes
     assert conf["seed"] == 2
     assert (conf["width"], conf["height"]) == (256, 256)
@@ -333,7 +388,7 @@ def test_cell_conf_text_types_overrides():
     assert conf["cutouts"] == 16  # yaml-typed, not the string "16"
     assert conf["cutout_sampler"] == "full"
     assert conf["file_namespace"] == cell.name
-    assert em.cell_conf_text(cell).startswith("# @package _global_\n")
+    assert em.cell_conf_text(cell, plan.tier).startswith("# @package _global_\n")
 
 
 # ----------------------------------------------------------------------
@@ -476,20 +531,96 @@ def test_trend_table_pools_cross_product_combos():
 
 
 # ----------------------------------------------------------------------
-# dry-run plan snapshot (2 legs + 1 sweep)
+# compare sheets (synthetic frames + scores; no renders)
 # ----------------------------------------------------------------------
 
 
-def test_dry_run_plan_snapshot():
+def _fake_frame(path: Path, size, color) -> None:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path)
+
+
+def _sheet_scores(plan, skip_key=None):
+    """Synthetic per-judge scores for every cell (optionally minus one)."""
+    scores = {judge: {} for judge in em.JUDGES}
+    for i, cell in enumerate(plan.cells):
+        key = em.cell_key(cell)
+        if key == skip_key:
+            continue
+        for j, judge in enumerate(em.JUDGES):
+            scores[judge][key] = 0.1 * (i + 1) + 0.01 * j
+    return scores
+
+
+def test_compare_sheet_writes_one_png_per_prompt_layout(tmp_path):
+    from PIL import Image
+
+    plan = _plan(legs=("a", "b:cutouts=16"), subset=1, root=tmp_path)
+    for cell in plan.cells:
+        _fake_frame(
+            em.final_frame_path(plan, cell), (cell.width, cell.height), (10, 60, 110)
+        )
+    prompt = plan.prompts[0]
+    out = tmp_path / "compare" / f"{prompt.id}.png"
+    out.parent.mkdir()
+    em.compare_sheet(plan, prompt, _sheet_scores(plan), out, tile_w=64)
+
+    with Image.open(out) as sheet:
+        # 2 leg columns x 2 seed rows of 64px-wide tiles at the prompt aspect
+        tile_h = round(64 * 256 / 256)
+        assert sheet.width == 2 * 10 + 2 * 64 + 4
+        assert sheet.height == 2 * 10 + 46 + 30 + 2 * (18 + tile_h) + 4
+
+
+def test_compare_sheet_marks_missing_frame_and_score(tmp_path):
+    plan = _plan(legs=("a", "b:cutouts=16"), subset=1, root=tmp_path)
+    missing = em.cell_key(plan.cells[-1])  # leg b, seed 3: no frame, no score
+    for cell in plan.cells:
+        if em.cell_key(cell) != missing:
+            _fake_frame(
+                em.final_frame_path(plan, cell), (cell.width, cell.height), (90, 20, 20)
+            )
+    prompt = plan.prompts[0]
+    out = tmp_path / f"{prompt.id}.png"
+    # must not die: the sheet marks the hole instead
+    em.compare_sheet(plan, prompt, _sheet_scores(plan, skip_key=missing), out)
+    assert out.is_file()
+
+
+def test_compare_sheet_uses_tier_aspect_for_tile_height(tmp_path):
+    from PIL import Image
+
+    plan = _plan(legs=("a",), subset=2, root=tmp_path, tier="full")
+    portrait = plan.prompts[1]
+    assert portrait.aspect == "3:4"
+    for cell in plan.cells:
+        _fake_frame(em.final_frame_path(plan, cell), (16, 16), (0, 0, 0))
+    out = tmp_path / f"{portrait.id}.png"
+    em.compare_sheet(plan, portrait, _sheet_scores(plan), out, tile_w=60)
+    with Image.open(out) as sheet:
+        tile_h = round(60 * 576 / 448)
+        assert sheet.height == 2 * 10 + 46 + 30 + 2 * (18 + tile_h) + 4
+
+
+# ----------------------------------------------------------------------
+# dry-run plan snapshots (2 legs + 1 sweep, one snapshot per tier)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tier", sorted(em.TIERS))
+def test_dry_run_plan_snapshot(tier):
     leg_set = em.assemble_legs(
-        [em.parse_leg_spec("default"), em.parse_leg_spec("full:cutout_sampler=full,cutouts=16")],
+        [em.parse_leg_spec("default"), em.parse_leg_spec("full16:cutout_sampler=full,cutouts=16")],
         None,
         [em.parse_sweep_spec("cut_pow=1,2")],
     )
     battery = em.parse_battery(em.DEFAULT_BATTERY)
-    plan = em.build_plan(battery, leg_set, 2)
+    plan = em.build_plan(battery, leg_set, 2, em.TIERS[tier])
     expected = (
-        SNAPSHOT_PATH.read_text(encoding="utf-8")
+        SNAPSHOT_PATHS[tier]
+        .read_text(encoding="utf-8")
         .replace("{battery}", str(em.DEFAULT_BATTERY))
         .rstrip("\n")
     )

@@ -12,10 +12,13 @@ per-prompt disagreement table is signal, not noise to smooth away. The
 golden parity fixtures (tests/fixtures/golden/) have NO quality authority
 here — the battery (tests/fixtures/eval/battery.yaml) is the basis.
 
-Tier: screening — 256-class dims scaled per aspect ('1:1' -> 256x256,
-'3:4' -> 240x320), 150 steps, save_every 25, backups 0, schema defaults
-otherwise. Screening ranks legs cheaply; it does not certify a look at
-production dims.
+Tier (--tier): screening (default) — 256-class dims scaled per aspect
+('1:1' -> 256x256, '3:4' -> 240x320), 150 steps; full — production dims
+('1:1' -> 512x512, '3:4' -> 448x576), 200 steps. Both save_every 25,
+backups 0, schema defaults otherwise. Screening ranks legs cheaply; full
+certifies at production dims. Cell workspaces live under
+/tmp/pytti-eval/<tier>/ so the tiers coexist; dims are tier-owned per
+aspect and never leg-overridable.
 
 Usage (leg mode — named legs, each a set of overrides on the shared base):
   .venv/bin/python scripts/eval_matrix.py \\
@@ -34,11 +37,16 @@ Win-rates anchor to --baseline (or, when sweeping, to the sole --legs leg).
 first: --dry-run prints the full cell matrix + commands and renders nothing.
 
 Per cell: `python -m pytti.workhorse` renders in its own scratch workspace
-under /tmp/pytti-eval/<leg>/<prompt>_s<seed>/ (detached process, log
+under /tmp/pytti-eval/<tier>/<leg>/<prompt>_s<seed>/ (detached process, log
 polled; a crash is fatal with the log tail). Resumable: a cell whose final
 frame already exists — and whose generated conf matches this plan — is
 skipped. Judging reuses scripts/judge_stills.py machinery in-process (one
 tower load per family, not one subprocess per image).
+
+Artifacts: per-leg contact grids, metrics.json, report.md, and — the
+primary human-comparison artifact — prompt-major compare sheets in
+<out>/compare/: one PNG per prompt, columns = legs, rows = seeds, every
+tile labeled with both judges' scores, missing cells marked.
 """
 
 from __future__ import annotations
@@ -70,15 +78,47 @@ EVAL_ROOT = Path("/tmp/pytti-eval")
 JUDGES = ("ViTL14", "SigLIP2SO400M")
 TIE_THRESHOLD = 0.002
 
-# screening tier: 256-class dims scaled per aspect
-ASPECT_DIMS = {"1:1": (256, 256), "3:4": (240, 320)}
-BASE_STEPS = 150
-BASE_SAVE_EVERY = 25
-TIER = (
-    "screening — 1:1 -> 256x256, 3:4 -> 240x320, "
-    f"{BASE_STEPS} steps, save_every {BASE_SAVE_EVERY}, backups 0, "
-    "schema defaults otherwise"
-)
+# the aspect vocabulary the battery may use; every tier maps each aspect
+ASPECTS = ("1:1", "3:4")
+
+
+@dataclass(frozen=True)
+class Tier:
+    """Render budget for one campaign: dims per aspect + step/save schedule.
+    Dims are tier-owned cell identity — never leg-overridable."""
+
+    name: str
+    dims: dict[str, tuple[int, int]]  # aspect -> (width, height)
+    steps: int
+    save_every: int
+
+    def describe(self) -> str:
+        dims = ", ".join(f"{a} -> {w}x{h}" for a, (w, h) in self.dims.items())
+        return (
+            f"{self.name} — {dims}, {self.steps} steps, "
+            f"save_every {self.save_every}, backups 0, schema defaults otherwise"
+        )
+
+
+TIERS = {
+    # screening ranks legs cheaply; it does not certify a look
+    "screening": Tier(
+        name="screening",
+        dims={"1:1": (256, 256), "3:4": (240, 320)},
+        steps=150,
+        save_every=25,
+    ),
+    # full certifies at production dims
+    "full": Tier(
+        name="full",
+        dims={"1:1": (512, 512), "3:4": (448, 576)},
+        steps=200,
+        save_every=25,
+    ),
+}
+assert all(
+    tuple(tier.dims) == ASPECTS for tier in TIERS.values()
+), f"every tier must map exactly the battery aspects {ASPECTS}"
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # progress heartbeat only: "  12/150 [" from a tqdm bar
@@ -186,8 +226,8 @@ def parse_battery(path: Path) -> Battery:
         if pid in seen:
             die(f"{where}: duplicate id {pid!r}")
         seen.add(pid)
-        if item["aspect"] not in ASPECT_DIMS:
-            die(f"{where}: aspect {item['aspect']!r} not in {sorted(ASPECT_DIMS)}")
+        if item["aspect"] not in ASPECTS:
+            die(f"{where}: aspect {item['aspect']!r} not in {sorted(ASPECTS)}")
         prompts.append(
             BatteryPrompt(
                 id=pid,
@@ -366,7 +406,8 @@ class Plan:
     battery: Battery
     prompts: tuple[BatteryPrompt, ...]  # after --subset
     legs: LegSet
-    root: Path
+    tier: Tier
+    root: Path  # tier-scoped: <eval root>/<tier>
     cells: tuple[Cell, ...]
 
 
@@ -388,7 +429,11 @@ def leg_int(leg: LegSpec, key: str, default: int) -> int:
 
 
 def build_plan(
-    battery: Battery, leg_set: LegSet, subset: int | None, root: Path = EVAL_ROOT
+    battery: Battery,
+    leg_set: LegSet,
+    subset: int | None,
+    tier: Tier,
+    root: Path = EVAL_ROOT,
 ) -> Plan:
     prompts = battery.prompts
     if subset is not None:
@@ -397,15 +442,15 @@ def build_plan(
         prompts = prompts[:subset]
     cells: list[Cell] = []
     for leg in leg_set.legs:
-        steps = leg_int(leg, "steps_per_scene", BASE_STEPS)
-        save_every = leg_int(leg, "save_every", BASE_SAVE_EVERY)
+        steps = leg_int(leg, "steps_per_scene", tier.steps)
+        save_every = leg_int(leg, "save_every", tier.save_every)
         if steps % save_every:
             die(
                 f"leg {leg.name!r}: steps_per_scene {steps} is not a multiple of "
                 f"save_every {save_every} — the final frame index would be ambiguous"
             )
         for prompt in prompts:
-            width, height = ASPECT_DIMS[prompt.aspect]
+            width, height = tier.dims[prompt.aspect]
             for seed in battery.seeds:
                 cells.append(
                     Cell(
@@ -418,7 +463,16 @@ def build_plan(
                         save_every=save_every,
                     )
                 )
-    return Plan(battery=battery, prompts=prompts, legs=leg_set, root=root, cells=tuple(cells))
+    return Plan(
+        battery=battery,
+        prompts=prompts,
+        legs=leg_set,
+        tier=tier,
+        # tier-scoped so screening and full campaigns coexist (and a tier
+        # switch can never trip the conf-mismatch resumability check)
+        root=root / tier.name,
+        cells=tuple(cells),
+    )
 
 
 def cell_workdir(plan: Plan, cell: Cell) -> Path:
@@ -440,14 +494,14 @@ def final_frame_path(plan: Plan, cell: Cell) -> Path:
     )
 
 
-def cell_conf_text(cell: Cell) -> str:
+def cell_conf_text(cell: Cell, tier: Tier) -> str:
     cfg: dict[str, object] = {
         "scenes": cell.prompt.scenes,
         "width": cell.width,
         "height": cell.height,
         "seed": cell.seed,
-        "steps_per_scene": BASE_STEPS,
-        "save_every": BASE_SAVE_EVERY,
+        "steps_per_scene": tier.steps,
+        "save_every": tier.save_every,
         "backups": 0,
         "file_namespace": cell.name,
     }
@@ -457,7 +511,8 @@ def cell_conf_text(cell: Cell) -> str:
         "# @package _global_\n"
         f"# generated by scripts/eval_matrix.py — leg {cell.leg.name!r}, "
         f"cell {cell.name!r}\n"
-        f"# category: {cell.prompt.category} · aspect {cell.prompt.aspect} · {TIER}\n"
+        f"# category: {cell.prompt.category} · aspect {cell.prompt.aspect} · "
+        f"{tier.describe()}\n"
     )
     return header + yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
 
@@ -484,7 +539,7 @@ def format_plan(plan: Plan, python_exe: str) -> str:
         f"battery: {plan.battery.path} — {len(plan.battery.prompts)} prompts, "
         f"seeds {list(plan.battery.seeds)}{subset_note}"
     )
-    lines.append(f"tier: {TIER}")
+    lines.append(f"tier: {plan.tier.describe()}")
     lines.append(f"judges: {' + '.join(JUDGES)} (always both; reported per judge)")
     base = plan.legs.baseline
     lines.append(f"baseline: {base if base else '(none — no win-rate-vs-baseline columns)'}")
@@ -557,7 +612,7 @@ def prepare_cell_workspace(plan: Plan, cell: Cell) -> Path:
     conf_dir.mkdir(parents=True)
     shutil.copyfile(pytti_assets_dir() / "default.yaml", workdir / "config" / "default.yaml")
     (conf_dir / "_empty.yaml").write_text("\n", encoding="utf-8")
-    cell_conf_path(plan, cell).write_text(cell_conf_text(cell), encoding="utf-8")
+    cell_conf_path(plan, cell).write_text(cell_conf_text(cell, plan.tier), encoding="utf-8")
     return workdir
 
 
@@ -567,7 +622,7 @@ def cell_is_done(plan: Plan, cell: Cell) -> bool:
     if not final.is_file():
         return False
     conf = cell_conf_path(plan, cell)
-    if not conf.is_file() or conf.read_text(encoding="utf-8") != cell_conf_text(cell):
+    if not conf.is_file() or conf.read_text(encoding="utf-8") != cell_conf_text(cell, plan.tier):
         die(
             f"{cell.leg.name}/{cell.name}: final frame exists but its conf does "
             f"not match this plan (leg redefined under the same name?). "
@@ -872,7 +927,7 @@ def contact_grid(
     seeds = plan.battery.seeds
     label_h, header_h = 18, 26
     row_heights = [
-        round(thumb_w * ASPECT_DIMS[p.aspect][1] / ASPECT_DIMS[p.aspect][0])
+        round(thumb_w * plan.tier.dims[p.aspect][1] / plan.tier.dims[p.aspect][0])
         for p in plan.prompts
     ]
     width = 2 * _MARGIN + len(seeds) * thumb_w + (len(seeds) - 1) * _GAP
@@ -909,6 +964,92 @@ def contact_grid(
     sheet.save(out_path)
 
 
+def compare_sheet(
+    plan: Plan,
+    prompt: BatteryPrompt,
+    all_scores: Scores,
+    out_path: Path,
+    tile_w: int = 256,
+) -> None:
+    """
+    Prompt-major comparison sheet — the primary human-comparison artifact:
+    one PNG per prompt, title = scenes text + category, columns = legs with
+    big name headers, rows = seeds, every tile labeled
+    's<seed>  <ViTL14>/<SO400M>'. A missing final frame or score renders as
+    a marked placeholder instead of dying: the sheet is for eyes, and
+    partial evidence beats none.
+    """
+    from PIL import Image, ImageDraw
+
+    legs = plan.legs.legs
+    seeds = plan.battery.seeds
+    w, h = plan.tier.dims[prompt.aspect]
+    tile_h = round(tile_w * h / w)
+    title_h, header_h, label_h = 46, 30, 18
+    width = 2 * _MARGIN + len(legs) * tile_w + (len(legs) - 1) * _GAP
+    height = (
+        2 * _MARGIN
+        + title_h
+        + header_h
+        + len(seeds) * (label_h + tile_h)
+        + (len(seeds) - 1) * _GAP
+    )
+    sheet = Image.new("RGB", (width, height), (24, 24, 24))
+    draw = ImageDraw.Draw(sheet)
+    # drawn text sticks to glyphs PIL's default font has (no em-dash: tofu)
+    small, med, big = _font(11), _font(15), _font(19)
+    draw.text(
+        (_MARGIN, _MARGIN),
+        f"{prompt.scenes} · {prompt.category}",
+        font=med,
+        fill=(255, 255, 255),
+    )
+    draw.text(
+        (_MARGIN, _MARGIN + 24),
+        f"tier {plan.tier.name} · rows = seeds · "
+        f"tile scores: {JUDGES[0]}/{JUDGES[1]}",
+        font=small,
+        fill=(170, 170, 170),
+    )
+    cells_by_key = {cell_key(c): c for c in plan.cells}
+    for col, leg in enumerate(legs):
+        draw.text(
+            (_MARGIN + col * (tile_w + _GAP), _MARGIN + title_h),
+            leg.name,
+            font=big,
+            fill=(255, 255, 255),
+        )
+    y = _MARGIN + title_h + header_h
+    for seed in seeds:
+        for col, leg in enumerate(legs):
+            x = _MARGIN + col * (tile_w + _GAP)
+            key = (leg.name, prompt.id, seed)
+            frame_path = final_frame_path(plan, cells_by_key[key])
+            scores = "/".join(
+                f"{s:.3f}" if s is not None else "-"
+                for s in (all_scores[judge].get(key) for judge in JUDGES)
+            )
+            if frame_path.is_file():
+                label = f"s{seed}  {scores}"
+                frame = Image.open(frame_path).resize((tile_w, tile_h), Image.LANCZOS)
+                sheet.paste(frame, (x, y + label_h))
+            else:
+                label = f"s{seed}  MISSING  {scores}"
+                draw.rectangle(
+                    (x, y + label_h, x + tile_w - 1, y + label_h + tile_h - 1),
+                    outline=(120, 60, 60),
+                )
+                draw.text(
+                    (x + 8, y + label_h + tile_h // 2 - 8),
+                    "missing frame",
+                    font=med,
+                    fill=(200, 90, 90),
+                )
+            draw.text((x, y + 2), label, font=small, fill=(200, 200, 200))
+        y += label_h + tile_h + _GAP
+    sheet.save(out_path)
+
+
 # ----------------------------------------------------------------------
 # report
 # ----------------------------------------------------------------------
@@ -930,7 +1071,7 @@ def write_report(
         "",
         f"- **when/where:** {time.strftime('%Y-%m-%d %H:%M:%S')} · {platform.platform()} · "
         f"torch {torch.__version__} · mps={torch.backends.mps.is_available()}",
-        f"- **tier:** {TIER}",
+        f"- **tier:** {plan.tier.describe()}",
         f"- **battery:** `{plan.battery.path}` — {len(plan.battery.prompts)} prompts, "
         f"seeds {list(plan.battery.seeds)}"
         + (
@@ -1035,6 +1176,15 @@ def write_report(
         "",
         "## Artifacts",
         "",
+        "Compare sheets (one per prompt: columns = legs, rows = seeds, both",
+        "judges on every tile) are the primary human-comparison artifact —",
+        "eyeball these before the tables:",
+        "",
+        *(
+            f"- compare sheet `{p.id}`: {out_dir / 'compare' / f'{p.id}.png'}"
+            for p in plan.prompts
+        ),
+        "",
         *(f"- contact grid `{leg}`: {out_dir / f'grid_{leg}.png'}" for leg in leg_names),
         f"- metrics: {out_dir / 'metrics.json'}",
         f"- cell workspaces/logs: {plan.root}/<leg>/<cell>/",
@@ -1062,7 +1212,12 @@ def write_metrics_json(
 
     leg_names = [leg.name for leg in plan.legs.legs]
     payload = {
-        "tier": TIER,
+        "tier": {
+            "name": plan.tier.name,
+            "dims": {aspect: list(dims) for aspect, dims in plan.tier.dims.items()},
+            "steps": plan.tier.steps,
+            "save_every": plan.tier.save_every,
+        },
         "battery": str(plan.battery.path),
         "seeds": list(plan.battery.seeds),
         "prompts_used": [p.id for p in plan.prompts],
@@ -1174,12 +1329,19 @@ def parse_args() -> argparse.Namespace:
         metavar="FIELD=V1,V2,...",
         help="sweep a field (repeatable; cross-products into auto-named legs)",
     )
+    parser.add_argument(
+        "--tier",
+        choices=sorted(TIERS),
+        default="screening",
+        help="render budget: screening ranks legs cheaply at small dims; "
+        "full certifies at production dims (default: screening)",
+    )
     parser.add_argument("--battery", type=Path, default=DEFAULT_BATTERY)
     parser.add_argument(
         "--out",
         type=Path,
-        default=EVAL_ROOT / "report",
-        help="report directory (default /tmp/pytti-eval/report; wiped)",
+        default=None,
+        help="report directory (default /tmp/pytti-eval/report-<tier>; wiped)",
     )
     parser.add_argument(
         "--subset", type=int, default=None, metavar="N", help="first N battery prompts"
@@ -1201,7 +1363,8 @@ def main() -> None:
     sweeps = [parse_sweep_spec(spec) for spec in args.sweep]
     leg_set = assemble_legs(explicit, baseline, sweeps)
     battery = parse_battery(args.battery)
-    plan = build_plan(battery, leg_set, args.subset)
+    tier = TIERS[args.tier]
+    plan = build_plan(battery, leg_set, args.subset, tier)
 
     if args.dry_run:
         print(format_plan(plan, sys.executable))
@@ -1225,10 +1388,14 @@ def main() -> None:
     ]
     rows = prompt_rows(all_scores, plan)
 
-    out_dir: Path = args.out
+    out_dir: Path = args.out if args.out is not None else EVAL_ROOT / f"report-{tier.name}"
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
+    compare_dir = out_dir / "compare"
+    compare_dir.mkdir()
+    for prompt in plan.prompts:
+        compare_sheet(plan, prompt, all_scores, compare_dir / f"{prompt.id}.png")
     for leg in leg_set.legs:
         contact_grid(plan, leg, all_scores, out_dir / f"grid_{leg.name}.png")
     write_metrics_json(plan, all_scores, trends, rows, out_dir)
