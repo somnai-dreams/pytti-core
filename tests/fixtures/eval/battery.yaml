@@ -1,0 +1,120 @@
+# Prompt battery for scripts/eval_matrix.py — the fixed basis that replaces
+# single-prompt single-seed judgment when comparing config legs.
+#
+# 10 prompts spanning pytti's use space, 2 seeds => 20 cells per leg at the
+# screening tier. Every final frame is scored by BOTH held-out judge families
+# (ViT-L/14 and SigLIP2-SO400M) and reported per judge — the families are
+# known to disagree across looks, so a single-family verdict is not a verdict.
+#
+# NOT related to tests/fixtures/golden/: those are parity fixtures with no
+# quality authority. This battery exists to measure quality differences.
+#
+# aspect alternates '1:1' <-> '3:4' down the list instead of crossing every
+# prompt with every aspect — a full cross doubles cost for little signal.
+# The prompt ORDER is chosen so that under strict alternation the naturally
+# vertical subjects (portrait, cathedral, street, full-body figure) land on
+# the '3:4' slots.
+#
+# id: filesystem-safe cell name component. category: the use-space slot the
+# prompt covers. rationale: why this prompt earns its slot.
+
+seeds: [2, 3]
+
+prompts:
+  - id: temple-lit
+    category: composed-scene-lighting
+    aspect: '1:1'
+    scenes: an ancient stone temple overgrown with bioluminescent vines, mist, dramatic lighting
+    rationale: >-
+      Composed multi-element scene with explicit lighting language — the
+      canonical "does the leg build a scene or a tapestry" probe. Same
+      subject matter as golden-lp-still (minus its style tags), so matrix
+      numbers can be eyeballed against the existing A/B corpus (e.g. the
+      2026-08-03 coherence_weighting verdict).
+
+  - id: leopard-portrait
+    category: organism-portrait
+    aspect: '3:4'
+    scenes: a portrait of a snow leopard, close up
+    rationale: >-
+      Single organism, portrait class. Probes whether a leg renders ONE
+      coherent subject with a face or dissolves it into fur texture — the
+      classic per-patch prompt-stuffing failure. Vertical subject, so it
+      takes a 3:4 slot.
+
+  - id: river-valley
+    category: landscape-depth
+    aspect: '1:1'
+    scenes: a winding river valley at sunrise, distant snowcapped mountains, morning haze
+    rationale: >-
+      Landscape with explicit depth cues (winding, distant, haze) — directly
+      probes fore/mid/background separation, the axis coherence-type changes
+      moved in prior A/Bs.
+
+  - id: brutalist-cathedral
+    category: architectural
+    aspect: '3:4'
+    scenes: a brutalist concrete cathedral with a tall rose window
+    rationale: >-
+      Architectural subject - straight edges, large flat planes, symmetry.
+      CLIP-guided synthesis is weakest at hard geometry, so legs separate
+      here. Tall subject on a 3:4 slot.
+
+  - id: rowboat-bridge
+    category: spatial-relation
+    aspect: '1:1'
+    scenes: a red rowboat beneath a stone bridge
+    rationale: >-
+      Multi-object spatial relation ("X beneath Y"). Tests relation binding
+      - whether both objects appear at all, and whether "beneath" survives
+      or the scene smears into boat-bridge soup.
+
+  - id: neon-market
+    category: style-heavy
+    aspect: '3:4'
+    # quoted: an unquoted " #" starts a YAML comment and silently truncates
+    scenes: 'cyberpunk street market at night #artstation | neon reflections, trending on artstation'
+    rationale: >-
+      The #artstation-era style-suffix idiom, exactly how the tool's users
+      actually prompted, including a piped secondary prompt. Style tokens
+      dominate the gradient; probes whether a leg keeps the subject under
+      heavy style pull. Vertical street scene on a 3:4 slot.
+
+  - id: oil-slick
+    category: abstract-texture
+    aspect: '1:1'
+    scenes: iridescent oil slick swirling on black water
+    rationale: >-
+      Abstract/texture-friendly — pytti's home turf. This is the floor
+      check; a leg that wins composed scenes but degrades the signature
+      abstract look is a regression, not a win.
+
+  - id: robot-knight
+    category: user-authentic
+    aspect: '3:4'
+    scenes: a full shot of a metallic, silver colored robotic knight standing in a desert
+    rationale: >-
+      Pulled VERBATIM from a real session
+      (pytti-able app/config/conf/_sessions/s-0027-a-full-shot.yaml) — real
+      user phrasing ("a full shot of", comma cadence), not benchmark-ese.
+      Full-body standing figure on a 3:4 slot.
+
+  - id: marching-band
+    category: crowd-pattern
+    aspect: '1:1'
+    scenes: a marching band parading down a city street
+    rationale: >-
+      Crowd/pattern-prone - many similar figures apply maximum pressure
+      toward repetition and per-patch duplication (the classic pytti
+      crowd-melt). Legs that fix tapestry behavior should separate most
+      visibly here.
+
+  - id: dog
+    category: bare-noun
+    aspect: '3:4'
+    scenes: dog
+    rationale: >-
+      Minimal bare-noun stress case; also matches real sessions verbatim
+      (s-0019-dog). With almost no text signal, differences between legs
+      are pure sampler/prior behavior — degenerate prompts expose
+      pathologies fastest.

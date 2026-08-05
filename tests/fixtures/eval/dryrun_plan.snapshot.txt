@@ -1,0 +1,50 @@
+pytti eval matrix — dry-run plan
+battery: {battery} — 10 prompts, seeds [2, 3]; subset -> first 2
+tier: screening — 1:1 -> 256x256, 3:4 -> 240x320, 150 steps, save_every 25, backups 0, schema defaults otherwise
+judges: ViTL14 + SigLIP2SO400M (always both; reported per judge)
+baseline: (none — no win-rate-vs-baseline columns)
+
+legs (4):
+  default    [explicit]  (schema defaults)
+  full       [explicit]  cutout_sampler=full, cutouts=16
+  cut_pow-1  [sweep   ]  cut_pow=1
+  cut_pow-2  [sweep   ]  cut_pow=2
+
+cells (16 = 4 legs x 2 prompts x 2 seeds):
+  leg        cell                 category                 size      steps  final
+  default    temple-lit_s2        composed-scene-lighting  256x256   150    /tmp/pytti-eval/default/temple-lit_s2/run/images_out/temple-lit_s2/temple-lit_s2_0006.png
+  default    temple-lit_s3        composed-scene-lighting  256x256   150    /tmp/pytti-eval/default/temple-lit_s3/run/images_out/temple-lit_s3/temple-lit_s3_0006.png
+  default    leopard-portrait_s2  organism-portrait        240x320   150    /tmp/pytti-eval/default/leopard-portrait_s2/run/images_out/leopard-portrait_s2/leopard-portrait_s2_0006.png
+  default    leopard-portrait_s3  organism-portrait        240x320   150    /tmp/pytti-eval/default/leopard-portrait_s3/run/images_out/leopard-portrait_s3/leopard-portrait_s3_0006.png
+  full       temple-lit_s2        composed-scene-lighting  256x256   150    /tmp/pytti-eval/full/temple-lit_s2/run/images_out/temple-lit_s2/temple-lit_s2_0006.png
+  full       temple-lit_s3        composed-scene-lighting  256x256   150    /tmp/pytti-eval/full/temple-lit_s3/run/images_out/temple-lit_s3/temple-lit_s3_0006.png
+  full       leopard-portrait_s2  organism-portrait        240x320   150    /tmp/pytti-eval/full/leopard-portrait_s2/run/images_out/leopard-portrait_s2/leopard-portrait_s2_0006.png
+  full       leopard-portrait_s3  organism-portrait        240x320   150    /tmp/pytti-eval/full/leopard-portrait_s3/run/images_out/leopard-portrait_s3/leopard-portrait_s3_0006.png
+  cut_pow-1  temple-lit_s2        composed-scene-lighting  256x256   150    /tmp/pytti-eval/cut_pow-1/temple-lit_s2/run/images_out/temple-lit_s2/temple-lit_s2_0006.png
+  cut_pow-1  temple-lit_s3        composed-scene-lighting  256x256   150    /tmp/pytti-eval/cut_pow-1/temple-lit_s3/run/images_out/temple-lit_s3/temple-lit_s3_0006.png
+  cut_pow-1  leopard-portrait_s2  organism-portrait        240x320   150    /tmp/pytti-eval/cut_pow-1/leopard-portrait_s2/run/images_out/leopard-portrait_s2/leopard-portrait_s2_0006.png
+  cut_pow-1  leopard-portrait_s3  organism-portrait        240x320   150    /tmp/pytti-eval/cut_pow-1/leopard-portrait_s3/run/images_out/leopard-portrait_s3/leopard-portrait_s3_0006.png
+  cut_pow-2  temple-lit_s2        composed-scene-lighting  256x256   150    /tmp/pytti-eval/cut_pow-2/temple-lit_s2/run/images_out/temple-lit_s2/temple-lit_s2_0006.png
+  cut_pow-2  temple-lit_s3        composed-scene-lighting  256x256   150    /tmp/pytti-eval/cut_pow-2/temple-lit_s3/run/images_out/temple-lit_s3/temple-lit_s3_0006.png
+  cut_pow-2  leopard-portrait_s2  organism-portrait        240x320   150    /tmp/pytti-eval/cut_pow-2/leopard-portrait_s2/run/images_out/leopard-portrait_s2/leopard-portrait_s2_0006.png
+  cut_pow-2  leopard-portrait_s3  organism-portrait        240x320   150    /tmp/pytti-eval/cut_pow-2/leopard-portrait_s3/run/images_out/leopard-portrait_s3/leopard-portrait_s3_0006.png
+
+commands (per cell; cwd = the cell workspace):
+  cd /tmp/pytti-eval/default/temple-lit_s2 && python -m pytti.workhorse conf=temple-lit_s2 hydra.run.dir=/tmp/pytti-eval/default/temple-lit_s2/run
+  cd /tmp/pytti-eval/default/temple-lit_s3 && python -m pytti.workhorse conf=temple-lit_s3 hydra.run.dir=/tmp/pytti-eval/default/temple-lit_s3/run
+  cd /tmp/pytti-eval/default/leopard-portrait_s2 && python -m pytti.workhorse conf=leopard-portrait_s2 hydra.run.dir=/tmp/pytti-eval/default/leopard-portrait_s2/run
+  cd /tmp/pytti-eval/default/leopard-portrait_s3 && python -m pytti.workhorse conf=leopard-portrait_s3 hydra.run.dir=/tmp/pytti-eval/default/leopard-portrait_s3/run
+  cd /tmp/pytti-eval/full/temple-lit_s2 && python -m pytti.workhorse conf=temple-lit_s2 hydra.run.dir=/tmp/pytti-eval/full/temple-lit_s2/run
+  cd /tmp/pytti-eval/full/temple-lit_s3 && python -m pytti.workhorse conf=temple-lit_s3 hydra.run.dir=/tmp/pytti-eval/full/temple-lit_s3/run
+  cd /tmp/pytti-eval/full/leopard-portrait_s2 && python -m pytti.workhorse conf=leopard-portrait_s2 hydra.run.dir=/tmp/pytti-eval/full/leopard-portrait_s2/run
+  cd /tmp/pytti-eval/full/leopard-portrait_s3 && python -m pytti.workhorse conf=leopard-portrait_s3 hydra.run.dir=/tmp/pytti-eval/full/leopard-portrait_s3/run
+  cd /tmp/pytti-eval/cut_pow-1/temple-lit_s2 && python -m pytti.workhorse conf=temple-lit_s2 hydra.run.dir=/tmp/pytti-eval/cut_pow-1/temple-lit_s2/run
+  cd /tmp/pytti-eval/cut_pow-1/temple-lit_s3 && python -m pytti.workhorse conf=temple-lit_s3 hydra.run.dir=/tmp/pytti-eval/cut_pow-1/temple-lit_s3/run
+  cd /tmp/pytti-eval/cut_pow-1/leopard-portrait_s2 && python -m pytti.workhorse conf=leopard-portrait_s2 hydra.run.dir=/tmp/pytti-eval/cut_pow-1/leopard-portrait_s2/run
+  cd /tmp/pytti-eval/cut_pow-1/leopard-portrait_s3 && python -m pytti.workhorse conf=leopard-portrait_s3 hydra.run.dir=/tmp/pytti-eval/cut_pow-1/leopard-portrait_s3/run
+  cd /tmp/pytti-eval/cut_pow-2/temple-lit_s2 && python -m pytti.workhorse conf=temple-lit_s2 hydra.run.dir=/tmp/pytti-eval/cut_pow-2/temple-lit_s2/run
+  cd /tmp/pytti-eval/cut_pow-2/temple-lit_s3 && python -m pytti.workhorse conf=temple-lit_s3 hydra.run.dir=/tmp/pytti-eval/cut_pow-2/temple-lit_s3/run
+  cd /tmp/pytti-eval/cut_pow-2/leopard-portrait_s2 && python -m pytti.workhorse conf=leopard-portrait_s2 hydra.run.dir=/tmp/pytti-eval/cut_pow-2/leopard-portrait_s2/run
+  cd /tmp/pytti-eval/cut_pow-2/leopard-portrait_s3 && python -m pytti.workhorse conf=leopard-portrait_s3 hydra.run.dir=/tmp/pytti-eval/cut_pow-2/leopard-portrait_s3/run
+
+dry run: nothing rendered, nothing written.
