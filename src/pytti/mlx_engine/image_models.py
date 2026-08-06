@@ -27,12 +27,23 @@ RGBImage::
 
     {"tensor": [1, 3, h, w]}                          trainable
 
+FourierImage::
+
+    {
+      "spectrum_real":  [3, h, w//2+1]  trainable (rfft2 layout)
+      "spectrum_imag":  [3, h, w//2+1]  trainable
+      "spectrum_scale": [h, w//2+1]     constant buffer (1/f^decay grid)
+      "color_matrix":   [3, 3]          constant buffer (lucid ImageNet)
+    }
+
 Trainable subsets are named by ``PIXEL_TRAINABLE_KEYS`` /
-``RGB_TRAINABLE_KEYS`` in the package ``__init__``; sizes (palette_size,
-n_palettes, h, w) are derived from the array shapes, never passed
-separately. Static config — ``scale`` and ``use_palette_target`` — is a
-keyword argument: a trace-time constant under ``mx.compile`` (it changes at
-most between runs, so it can never silently freeze mid-render).
+``RGB_TRAINABLE_KEYS`` / ``FOURIER_TRAINABLE_KEYS`` in the package
+``__init__``; sizes (palette_size, n_palettes, h, w) are derived from the
+array shapes, never passed separately. Static config — ``scale`` and
+``use_palette_target`` (and FourierImage's ``width``, which the rfft2
+layout cannot disambiguate: even and odd widths share a spectrum shape) —
+is a keyword argument: a trace-time constant under ``mx.compile`` (it
+changes at most between runs, so it can never silently freeze mid-render).
 
 Decoded images are **NCHW** fp32 ``[1, 3, h*scale, w*scale]`` —
 ``("n", "s", "y", "x")``, matching the torch classes and slice S2's layout
@@ -53,6 +64,13 @@ tests/test_mlx_engine_images.py):
   in-range pixels pass their gradient; out-of-range pixels pass it only
   when it points back toward the range. The gate depends on the incoming
   cotangent, so it needs a real custom VJP, not a stop-gradient recipe.
+- ``fourier_decode`` is ``FourierImage._decode_logical`` (fourier.py:350):
+  complex spectrum built in-graph as ``real + 1j*imag`` (MLX's
+  ``torch.complex`` idiom), ``mx.fft.irfft2`` (whose VJP is correct on
+  Metal, eager AND under ``mx.compile`` — probed 2026-08 at every
+  FourierImage shape class incl. odd widths), lucid's /4, color matrix,
+  sigmoid. Gradients flow through the complex construction back to the
+  float32 real/imag leaves — no Wirtinger handling needed.
 
 The per-step ``update()`` clamps are pure functions tree -> tree; the
 assembly applies them AFTER the Adam update (ImageGuide.py:317-318 order).
@@ -69,6 +87,8 @@ import mlx.core as mx
 import numpy as np
 import torch
 
+from pytti.image_models.fourier import LUCID_OUTPUT_DIVISOR, fourier_scale
+from pytti.image_models.init_noise import imagenet_color_matrix
 from pytti.mlx_engine import PALETTE_INERTIA
 from pytti.mlx_engine.losses import straight_through
 
@@ -204,6 +224,39 @@ def _validate_rgb_tree(params: dict) -> None:
         raise ValueError(f"params['tensor'] must be fp32, got {tensor.dtype}")
     if tensor.ndim != 4 or tensor.shape[0] != 1 or tensor.shape[1] != 3:
         raise ValueError(f"tensor must be [1, 3, h, w], got {tensor.shape}")
+
+
+def _validate_fourier_tree(params: dict) -> None:
+    required = {"spectrum_real", "spectrum_imag", "spectrum_scale", "color_matrix"}
+    if set(params) != required:
+        raise ValueError(
+            "FourierImage params tree keys off-contract: "
+            f"missing {sorted(required - set(params))}, "
+            f"unknown {sorted(set(params) - required)}"
+        )
+    for name, arr in params.items():
+        if arr.dtype != mx.float32:
+            raise ValueError(f"params[{name!r}] must be fp32, got {arr.dtype}")
+    real = params["spectrum_real"]
+    if real.ndim != 3 or real.shape[0] != 3:
+        raise ValueError(
+            f"spectrum_real must be [3, h, w//2+1] (rfft2 layout), "
+            f"got {real.shape}"
+        )
+    if params["spectrum_imag"].shape != real.shape:
+        raise ValueError(
+            f"spectrum_imag shape {params['spectrum_imag'].shape} != "
+            f"spectrum_real shape {real.shape}"
+        )
+    if params["spectrum_scale"].shape != real.shape[1:]:
+        raise ValueError(
+            f"spectrum_scale must be {tuple(real.shape[1:])} (the spectral "
+            f"grid), got {params['spectrum_scale'].shape}"
+        )
+    if params["color_matrix"].shape != (3, 3):
+        raise ValueError(
+            f"color_matrix must be [3, 3], got {params['color_matrix'].shape}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +430,47 @@ def rgb_update(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# FourierImage (Unlimited Palette, fourier_parameterization)
+# ---------------------------------------------------------------------------
+
+
+def fourier_decode(params: dict, *, scale: int, width: int) -> mx.array:
+    """
+    ``FourierImage.decode_tensor`` (fourier.py:350-361) -> ``[1, 3, h*scale,
+    w*scale]``: spectrum * 1/f scale -> irfft2 -> /4 -> lucid color matrix
+    -> sigmoid -> nearest upsample. ``width`` is the LOGICAL grid width, a
+    trace-time constant: the rfft2 layout ([.., w//2+1]) cannot
+    disambiguate even from odd widths, exactly why the torch decode passes
+    ``s=`` (fourier.py:353). All real dtypes stay fp32; the complex
+    intermediate is complex64 (fp32 pairs), matching torch's pipeline.
+    """
+    _validate_fourier_tree(params)
+    height = params["spectrum_real"].shape[1]
+    if width // 2 + 1 != params["spectrum_real"].shape[2] or width < 1:
+        raise ValueError(
+            f"width={width} does not match the spectrum's rfft2 layout "
+            f"[.., {params['spectrum_real'].shape[2]}] (expects "
+            f"w//2+1 == {params['spectrum_real'].shape[2]})"
+        )
+    # torch.complex(re, im) has no MLX constructor; re + 1j*im is the idiom
+    # and its VJP routes gradients back to the real fp32 leaves correctly
+    spectrum = params["spectrum_real"] + 1j * params["spectrum_imag"]
+    spectrum = spectrum * params["spectrum_scale"].astype(mx.complex64)
+    # backward-normalized like torch's default (matches TF's irfft2d)
+    pixels = mx.fft.irfft2(spectrum, s=(height, width))
+    basis = pixels / LUCID_OUTPUT_DIVISOR
+    rgb = mx.einsum("ck,khw->chw", params["color_matrix"], basis)
+    return nearest_upsample(mx.sigmoid(rgb)[None], scale)
+
+
+def fourier_update(params: dict) -> dict:
+    """FourierImage defines no ``update()`` clamps (the sigmoid keeps the
+    decode in (0, 1) for any spectrum) — identity, uniform interface."""
+    _validate_fourier_tree(params)
+    return dict(params)
+
+
+# ---------------------------------------------------------------------------
 # torch state_dict <-> params tree (both directions lossless, fail loud)
 # ---------------------------------------------------------------------------
 
@@ -462,3 +556,53 @@ def rgb_state_dict_from_params(params: dict) -> dict:
     """Params tree -> torch CPU fp32 tensors for ``RGBImage.load_state_dict``."""
     _validate_rgb_tree(params)
     return {"tensor": _to_torch("tensor", params["tensor"])}
+
+
+# FourierImage.state_dict() carries ONLY the trainable spectrum: the scale
+# grid and color matrix are non-persistent buffers, recomputed at
+# construction (fourier.py:331-340) — so the tree's constant entries are
+# recomputed here too, from the SAME torch functions, on CPU (bit-identical
+# to a CPU-built module; fourier_scale's energy normalization runs its
+# float64 reduction host-side by design, never in-graph).
+_FOURIER_STATE_KEYS = ("spectrum_real", "spectrum_imag")
+
+
+def fourier_params_from_state_dict(state_dict: dict, *, width: int, decay: float) -> dict:
+    """
+    ``FourierImage.state_dict()`` -> params tree. ``width``/``decay`` are
+    the module's logical grid width and ``fourier_decay`` (the state_dict
+    cannot carry them: width is rfft2-ambiguous, decay is construction
+    config) — the engine reads both off the live module.
+    """
+    if set(state_dict) != set(_FOURIER_STATE_KEYS):
+        raise ValueError(
+            "FourierImage state_dict keys off-contract: "
+            f"got {sorted(state_dict)}, expected exactly "
+            f"{sorted(_FOURIER_STATE_KEYS)}"
+        )
+    params = {key: _to_mx(key, state_dict[key]) for key in _FOURIER_STATE_KEYS}
+    height, spectral_width = (
+        params["spectrum_real"].shape[1],
+        params["spectrum_real"].shape[2],
+    )
+    if width // 2 + 1 != spectral_width:
+        raise ValueError(
+            f"width={width} does not match the spectrum's rfft2 layout "
+            f"[.., {spectral_width}] (expects w//2+1 == {spectral_width})"
+        )
+    params["spectrum_scale"] = mx.array(
+        fourier_scale(height, width, decay, "cpu").numpy()
+    )
+    params["color_matrix"] = mx.array(
+        imagenet_color_matrix(torch.float32, "cpu").numpy()
+    )
+    _validate_fourier_tree(params)
+    return params
+
+
+def fourier_state_dict_from_params(params: dict) -> dict:
+    """Params tree -> torch CPU fp32 tensors for
+    ``FourierImage.load_state_dict`` (strict): the spectrum only, exactly
+    the torch module's persistent state — the ``.bak`` round trip."""
+    _validate_fourier_tree(params)
+    return {key: _to_torch(key, params[key]) for key in _FOURIER_STATE_KEYS}

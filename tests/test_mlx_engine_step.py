@@ -27,7 +27,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from pytti.image_models import PixelImage, RGBImage
+from pytti.image_models import FourierImage, PixelImage, RGBImage
 from pytti.LossAug.MSELossClass import MSELoss
 from pytti.LossAug.TVLossClass import TVLoss
 from pytti.Perceptor.cutouts.augs import BatchedAugs
@@ -475,6 +475,69 @@ class TestEngineAssembly:
         ]
         assert all(math.isfinite(float(r["TOTAL"])) for r in records)
 
+    def test_fourier_image_runs(self):
+        """The Fourier tree through the whole compiled step (irfft2 + VJP
+        inside mx.compile): records keep torch names, Adam descends from
+        the production near-gray init."""
+        torch.manual_seed(SEED)
+        img = FourierImage(64, 48, 1, device=CPU)
+        img.encode_random()
+        engine = _make_engine(img=img)
+        assert engine._image_kind == "fourier"
+        records = self._run(engine, steps=5)
+        assert list(records[0]) == [
+            "smoothing loss (TV)", "a test prompt", "left side", "TOTAL",
+        ]
+        totals = [float(r["TOTAL"]) for r in records]
+        assert all(math.isfinite(v) for v in totals)
+        assert min(totals[1:]) < totals[0]
+        assert int(engine._opt.state["step"]) == 5
+
+    def test_fourier_bak_round_trip(self, tmp_path):
+        """Gate (c) for the Fourier tree, BOTH directions: a torch-side
+        trajectory's .bak resumes on mlx bit-exactly, and after mlx steps
+        write_back's .bak restores to the exact MLX decode on torch."""
+        from pytti.mlx_engine.image_models import fourier_decode
+
+        # torch renders -> .bak -> mlx resumes
+        torch.manual_seed(SEED)
+        source = FourierImage(64, 48, 1, device=CPU)
+        source.encode_random()
+        opt = torch.optim.Adam(source.parameters(), lr=0.05)
+        w = torch.randn((1, 3, 48, 64), generator=torch.Generator().manual_seed(3))
+        for _ in range(3):  # a real torch trajectory, not just an init
+            opt.zero_grad()
+            (source.decode_tensor() * w).sum().backward()
+            opt.step()
+        bak = tmp_path / "torch_rendered.bak"
+        torch.save(source.state_dict(), bak)
+
+        img = FourierImage(64, 48, 1, device=CPU)
+        img.load_state_dict(torch.load(bak))
+        engine = _make_engine(img=img)
+        for key in ("spectrum_real", "spectrum_imag"):
+            assert np.array_equal(
+                np.array(engine._params[key]),
+                source.state_dict()[key].numpy(),
+            ), key
+        self._run(engine, steps=3)
+
+        # mlx renders -> write_back .bak -> torch restores
+        engine.write_back(img)
+        bak2 = tmp_path / "mlx_rendered.bak"
+        torch.save(img.state_dict(), bak2)
+        restored = FourierImage(64, 48, 1, device=CPU)
+        restored.load_state_dict(torch.load(bak2))
+        with torch.no_grad():
+            decode_torch = restored.decode_tensor().numpy()
+        decode_mlx = np.array(fourier_decode(engine._params, scale=1, width=64))
+        assert float(np.abs(decode_torch - decode_mlx).max()) <= 1e-6
+
+        # and an engine built from the restored module resumes the tree
+        resumed = _make_engine(img=restored)
+        for key, value in engine._params.items():
+            assert np.array_equal(np.array(value), np.array(resumed._params[key])), key
+
     def test_full_sampler_runs_and_descends(self):
         """cutout_sampler=full through the whole compiled step: accepted by
         the eligibility gate, TOTAL finite and descending — the full-vision
@@ -755,6 +818,10 @@ class TestFullStepParity:
             reference = _pixel_image(128, 128)
             reference.encode_random()
             candidate = _pixel_image(128, 128)
+        elif image_model == "fourier":
+            reference = FourierImage(128, 128, 1, device=CPU)
+            reference.encode_random()  # the production near-gray init
+            candidate = FourierImage(128, 128, 1, device=CPU)
         else:
             reference = RGBImage(128, 128, 1, device=CPU)
             reference.encode_random()
@@ -801,9 +868,12 @@ class TestFullStepParity:
         from pytti.mlx_engine.step import trainable_keys_for
 
         geometry = GEOMETRIES[geometry_name]
+        # the torch reference guide runs at the model's own default lr
+        # (DirectImageGuide lr=None -> image_rep.lr): 0.02 for pixel/rgb,
+        # FOURIER_LR_DEFAULT 0.05 for fourier — mirror it exactly
         engine = MLXStillEngine(
             img, embedder, _base_params(coherence_weighting=coherence),
-            lr=0.02, tower_dtype=tower_dtype,
+            lr=float(img.lr), tower_dtype=tower_dtype,
             cutter=_mlx_cutter(with_augs, geometry),
         )
         record = engine.train_step(
@@ -845,6 +915,10 @@ class TestFullStepParity:
             # pre-aug) at the established fp32 gates, coherence ON — the
             # designed full-vision stack, uniform-no-op weights included
             ("pixel", "float32", 1, True, True, "full", 1e-5, 2e-3, 0.99999),
+            # FourierImage: irfft2 + its VJP inside the compiled step, at
+            # the same fp32/fp16 gate classes as the pixel-domain trees
+            ("fourier", "float32", 1, True, False, "geo", 1e-5, 2e-3, 0.99999),
+            ("fourier", "float16", 1, True, False, "geo", 1e-2, 2.5e-1, 0.97),
         ],
     )
     def test_full_step_parity(
@@ -893,6 +967,80 @@ class TestFullStepParity:
                 / (np.linalg.norm(delta_mlx) * np.linalg.norm(delta_torch))
             )
             assert cos >= delta_cos_gate, f"{key} delta: cosine {cos}"
+
+    def test_fourier_trajectory_parity(self, clip_embedder, monkeypatch):
+        """20 lockstep steps on the real ViTB32 tower, RNG factored out on
+        both sides (injected geometry, replayed augs, injected noise): the
+        torch and mlx Fourier trajectories must track through 20 Adam
+        updates — loss curves within accumulated-fp32-drift tolerance and
+        the final frames visually equivalent (the gate-b pattern, extended
+        along the time axis)."""
+        from pytti.ImageGuide import DirectImageGuide
+        from pytti.mlx_engine.engine import MLXStillEngine
+        from pytti.mlx_engine.image_models import fourier_decode
+        from pytti.Perceptor import Embedder as embedder_module
+        from pytti.Perceptor.Prompt import parse_prompt
+
+        reference, candidate = self._images("fourier")
+        prompts = [
+            parse_prompt(clip_embedder, "a red mushroom on mossy ground:1",
+                         device=CPU),
+        ]
+        prompts[0].device = CPU
+        monkeypatch.setitem(
+            embedder_module.CUTOUT_SAMPLERS,
+            "batched",
+            _torch_fake_batched(True),
+        )
+        guide = DirectImageGuide(
+            image_rep=reference,
+            embedder=clip_embedder,
+            params=OmegaConf.create(
+                dict(
+                    perceptor_backend="torch", optimizer="adam",
+                    input_audio="", input_audio_filters=None,
+                )
+            ),
+        )
+        torch_totals = []
+        for _i in range(20):
+            guide.train(0, prompts, [], [_tv_loss(0.02)], interp_steps=0)
+            torch_totals.append(float(guide.loss_history[-1]["TOTAL"]))
+
+        engine = MLXStillEngine(
+            candidate, clip_embedder, _base_params(),
+            lr=float(candidate.lr), tower_dtype="float32",
+            cutter=_mlx_cutter(True),
+        )
+        mlx_totals = []
+        for _i in range(20):
+            record = engine.train_step(0, prompts, [], [_tv_loss(0.02)])
+            mlx_totals.append(float(record["TOTAL"]))
+
+        # loss curve: fp32 drift compounds through Adam moments; measured
+        # worst per-step rel 1.15e-4 at 20 steps (2026-08) — gate ~10x above
+        worst = max(
+            rel_err(m, t) for m, t in zip(mlx_totals, torch_totals, strict=True)
+        )
+        assert worst <= 1e-3, f"loss curves diverged: worst rel {worst}"
+        # both descended (the objective is real on this tower)
+        assert min(torch_totals[5:]) < torch_totals[0]
+        assert min(mlx_totals[5:]) < mlx_totals[0]
+
+        # final frames: visually equivalent. Measured (2026-08): mean diff
+        # 3.7e-4 (~0.1 8-bit level), p99 1.8e-3, max 7.5e-3 (< 2 levels, on
+        # 0.06% of pixels) — imperceptible; elementwise-max alone would
+        # gate on the single worst pixel of a 20-step compounded float
+        # trajectory, so pair a distribution gate with a loose max
+        with torch.no_grad():
+            frame_torch = reference.decode_tensor().numpy()
+        frame_mlx = np.array(fourier_decode(engine._params, scale=1, width=128))
+        diff = np.abs(frame_mlx - frame_torch)
+        assert float(diff.mean()) <= 1.0 / 255.0, f"mean diff {diff.mean()}"
+        assert float(np.percentile(diff, 99)) <= 1.0 / 255.0, (
+            f"p99 diff {np.percentile(diff, 99)}"
+        )
+        assert float(diff.max()) <= 4.0 / 255.0, f"max diff {diff.max()}"
 
     def test_bak_round_trip_after_real_steps(self, clip_embedder, tmp_path):
         """Gate (c) on the real towers: 3 unfactored (live-RNG) steps, then

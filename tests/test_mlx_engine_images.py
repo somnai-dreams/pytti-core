@@ -7,12 +7,16 @@ needs mlx (darwin-only backend); linux CI skips it at collection.
 
 Gates enforced:
 - decode value parity <= 1e-6 fp32, 64x64 canvas at scale 1 AND scale 2,
-  both image models, palette-target passthrough included;
+  both pixel-domain image models, palette-target passthrough included;
+- FourierImage decode parity <= 1e-5 at 128x128 / 160x96 / 224x224 (and an
+  odd width, the no-Nyquist-column rfft2 layout) on wide random spectra
+  (measured <= 6e-7 — the fp32 FFT noise floor);
 - gradient parity via mx.grad vs torch autograd on the same scalar loss,
-  cosine >= 0.9999 per param group;
+  cosine >= 0.9999 per param group (spectrum params included);
 - argsort palette-order index equality on random palettes;
 - HdrLoss / PaletteLoss value + grad parity <= 1e-6;
-- state_dict import/export round-trip exactness (strict load included).
+- state_dict import/export round-trip exactness (strict load included;
+  Fourier's recomputed scale/color constants bit-match the torch buffers).
 """
 
 import importlib.util
@@ -65,6 +69,22 @@ def make_rgb(scale=1, seed=0):
     return img
 
 
+def make_fourier(width=SIDE, height=SIDE, scale=1, decay=1.0, seed=0, sd=1.0):
+    from pytti.image_models import FourierImage
+
+    img = FourierImage(
+        width // scale, height // scale, scale, decay=decay, device=CPU
+    )
+    g = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        # much wider than the production init sd (0.01, a near-gray start):
+        # sd 1.0 pushes the decode across the whole sigmoid, exercising the
+        # saturated tails as well as the near-linear middle
+        img.spectrum_real.copy_(torch.randn(img.spectrum_real.shape, generator=g) * sd)
+        img.spectrum_imag.copy_(torch.randn(img.spectrum_imag.shape, generator=g) * sd)
+    return img
+
+
 def pixel_tree(img):
     from pytti.mlx_engine import pixel_params_from_state_dict
 
@@ -75,6 +95,15 @@ def rgb_tree(img):
     from pytti.mlx_engine import rgb_params_from_state_dict
 
     return rgb_params_from_state_dict(img.state_dict())
+
+
+def fourier_tree(img):
+    from pytti.mlx_engine import fourier_params_from_state_dict
+
+    width, _height = img.image_shape
+    return fourier_params_from_state_dict(
+        img.state_dict(), width=width // img.scale, decay=img.decay
+    )
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -337,6 +366,114 @@ def test_clamp_with_grad_semantics_exact():
 
 
 # ---------------------------------------------------------------------------
+# FourierImage decode + grads (mx.fft.irfft2 in the graph)
+# ---------------------------------------------------------------------------
+
+# the port's specced parity shapes: square, landscape-non-square, the
+# perceptor-native 224, plus an odd width (no Nyquist column in the rfft2
+# layout — the other Hermitian-projection branch of irfft2)
+FOURIER_SHAPES = [(128, 128), (160, 96), (224, 224), (95, 64)]
+
+
+@pytest.mark.parametrize(("width", "height"), FOURIER_SHAPES)
+def test_fourier_decode_parity(width, height):
+    from pytti.mlx_engine import fourier_decode
+
+    img = make_fourier(width=width, height=height, seed=width + height)
+    ref = img.decode_tensor().detach().numpy()
+    out = np.array(fourier_decode(fourier_tree(img), scale=1, width=width))
+    assert out.shape == ref.shape == (1, 3, height, width)
+    assert np.abs(out - ref).max() <= 1e-5  # measured <= 6e-7
+
+
+@pytest.mark.parametrize(("scale", "decay"), [(2, 1.0), (1, 3.0)])
+def test_fourier_decode_parity_scale_and_decay(scale, decay):
+    from pytti.mlx_engine import fourier_decode
+
+    img = make_fourier(scale=scale, decay=decay, seed=11)
+    ref = img.decode_tensor().detach().numpy()
+    out = np.array(fourier_decode(fourier_tree(img), scale=scale, width=SIDE // scale))
+    assert out.shape == ref.shape == (1, 3, SIDE, SIDE)
+    assert np.abs(out - ref).max() <= 1e-5
+
+
+@pytest.mark.parametrize(("width", "height"), FOURIER_SHAPES)
+def test_fourier_grad_parity(width, height):
+    import mlx.core as mx
+
+    from pytti.mlx_engine import fourier_decode
+
+    img = make_fourier(width=width, height=height, seed=37)
+    w = torch.randn(
+        (1, 3, height, width), generator=torch.Generator().manual_seed(41)
+    )
+    (img.decode_tensor() * w).sum().backward()
+
+    tree = fourier_tree(img)
+    w_mx = mx.array(w.numpy())
+    grads = mx.grad(
+        lambda tr: mx.sum(fourier_decode(tr, scale=1, width=width) * w_mx)
+    )(tree)
+    for name, param in (
+        ("spectrum_real", img.spectrum_real),
+        ("spectrum_imag", img.spectrum_imag),
+    ):
+        assert cosine(np.array(grads[name]), param.grad.numpy()) >= 0.9999, name
+
+
+def test_fourier_update_is_identity():
+    from pytti.mlx_engine import fourier_update
+
+    tree = fourier_tree(make_fourier(seed=43))
+    out = fourier_update(tree)
+    assert set(out) == set(tree)
+    for key in tree:
+        assert np.array_equal(np.array(out[key]), np.array(tree[key])), key
+
+
+def test_fourier_decode_rejects_wrong_width():
+    from pytti.mlx_engine import fourier_decode
+
+    tree = fourier_tree(make_fourier(seed=44))
+    with pytest.raises(ValueError, match="rfft2 layout"):
+        fourier_decode(tree, scale=1, width=SIDE + 2)
+
+
+def test_fourier_decode_and_grad_compile():
+    # the load-bearing gate for the whole-step port: irfft2's VJP must
+    # survive mx.compile with values intact (probed 2026-08; regression-
+    # gated here)
+    import mlx.core as mx
+
+    from pytti.mlx_engine import fourier_decode
+
+    tree = fourier_tree(make_fourier(seed=47))
+    w = mx.array(
+        np.random.default_rng(1).standard_normal((1, 3, SIDE, SIDE)).astype(np.float32)
+    )
+
+    def loss(tr):
+        return mx.sum(fourier_decode(tr, scale=1, width=SIDE) * w)
+
+    eager_val = np.array(fourier_decode(tree, scale=1, width=SIDE))
+    compiled_val = np.array(
+        mx.compile(lambda tr: fourier_decode(tr, scale=1, width=SIDE))(tree)
+    )
+    assert np.abs(eager_val - compiled_val).max() <= 1e-6
+
+    g_eager = mx.grad(loss)(tree)
+    g_compiled = mx.compile(mx.grad(loss))(tree)
+    for key in ("spectrum_real", "spectrum_imag"):
+        eager = np.array(g_eager[key])
+        assert np.abs(eager).max() > 0, key
+        # relative gate: the 1/f scale makes low-frequency grad entries
+        # large, so compile's fusion reordering shows up as ~1e-6 ABSOLUTE
+        # wiggle on O(1e2) values — relative it is float noise
+        diff = np.abs(eager - np.array(g_compiled[key])).max()
+        assert diff / np.abs(eager).max() <= 1e-6, key
+
+
+# ---------------------------------------------------------------------------
 # state_dict import/export
 # ---------------------------------------------------------------------------
 
@@ -399,6 +536,64 @@ def test_rgb_state_dict_round_trip():
     assert torch.equal(sd2["tensor"], sd["tensor"])
     fresh = RGBImage(SIDE, SIDE, 1, device=CPU)
     fresh.load_state_dict(sd2)
+
+
+def test_fourier_state_dict_round_trip():
+    from pytti.image_models import FourierImage
+    from pytti.mlx_engine import (
+        fourier_params_from_state_dict,
+        fourier_state_dict_from_params,
+    )
+
+    img = make_fourier(seed=53, decay=2.0)
+    sd = img.state_dict()
+    assert set(sd) == {"spectrum_real", "spectrum_imag"}  # buffers excluded
+    tree = fourier_params_from_state_dict(sd, width=SIDE, decay=2.0)
+    sd2 = fourier_state_dict_from_params(tree)
+    assert set(sd2) == set(sd)
+    for key in sd:
+        assert torch.equal(sd2[key], sd[key]), key  # bit-identical
+
+    # the recomputed constants ARE the torch module's buffers (same torch
+    # functions, same cpu float path)
+    assert np.array_equal(
+        np.array(tree["spectrum_scale"]), img.spectrum_scale.numpy()
+    )
+    assert np.array_equal(np.array(tree["color_matrix"]), img.color_matrix.numpy())
+
+    fresh = FourierImage(SIDE, SIDE, 1, decay=2.0, device=CPU)
+    fresh.load_state_dict(sd2)  # strict — key or shape drift fails loud
+
+    tree2 = fourier_params_from_state_dict(sd2, width=SIDE, decay=2.0)
+    assert set(tree2) == set(tree)
+    for key in tree:
+        assert np.array_equal(np.array(tree2[key]), np.array(tree[key])), key
+
+
+def test_fourier_import_rejects_off_contract():
+    from pytti.mlx_engine import fourier_params_from_state_dict
+
+    sd = make_fourier(seed=54).state_dict()
+
+    missing = dict(sd)
+    del missing["spectrum_imag"]
+    with pytest.raises(ValueError, match="spectrum_imag"):
+        fourier_params_from_state_dict(missing, width=SIDE, decay=1.0)
+
+    extra = dict(sd)
+    extra["bogus"] = torch.zeros(1)
+    with pytest.raises(ValueError, match="bogus"):
+        fourier_params_from_state_dict(extra, width=SIDE, decay=1.0)
+
+    with pytest.raises(ValueError, match="rfft2 layout"):
+        fourier_params_from_state_dict(sd, width=SIDE + 2, decay=1.0)
+
+    with pytest.raises(ValueError, match="fourier_decay"):
+        fourier_params_from_state_dict(sd, width=SIDE, decay=99.0)
+
+    doubled = {k: v.double() for k, v in sd.items()}
+    with pytest.raises(ValueError, match="fp32"):
+        fourier_params_from_state_dict(doubled, width=SIDE, decay=1.0)
 
 
 def test_import_rejects_off_contract_state_dicts():

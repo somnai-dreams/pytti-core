@@ -19,10 +19,11 @@ seam map draws:
   torch-serialized and ``restore=True`` round-trips (gate c).
 
 Eligibility is validated LOUDLY at construction (seam map §4 "Proposed M2
-torch boundary"): still mode, PixelImage/RGBImage, batched|smart|full sampler,
-plain Adam, and no semantic-mask / semantic-image-prompt / depth / video
-features — each rejection names the backend that does support the config.
-The torch and M1-mlx paths are untouched.
+torch boundary"): still mode, PixelImage/RGBImage/FourierImage,
+batched|smart|full sampler, plain Adam, and no semantic-mask /
+semantic-image-prompt / depth / video features — each rejection names the
+backend that does support the config. The torch and M1-mlx paths are
+untouched.
 
 Structure changes (scene boundaries changing the prompt set, the interp
 ramp ending) rebuild the compiled step; per-step values never do.
@@ -41,7 +42,7 @@ from loguru import logger
 from torchvision.transforms import functional as TF
 
 from pytti.eval_tools import is_zero_weight, parametric_eval
-from pytti.image_models import PixelImage, RGBImage
+from pytti.image_models import FourierImage, PixelImage, RGBImage
 from pytti.image_models.pixel import HdrLoss, PaletteLoss
 from pytti.LossAug.EdgeLossClass import EdgeLoss
 from pytti.LossAug.HSVLossClass import HSVLoss
@@ -49,6 +50,8 @@ from pytti.LossAug.MSELossClass import MSELoss
 from pytti.LossAug.TVLossClass import TVLoss
 from pytti.mlx_engine.augs import AugConfig
 from pytti.mlx_engine.image_models import (
+    fourier_params_from_state_dict,
+    fourier_state_dict_from_params,
     pixel_params_from_state_dict,
     pixel_state_dict_from_params,
     rgb_params_from_state_dict,
@@ -135,7 +138,6 @@ class MLXStillEngine:
         state_dict = image_rep.state_dict()
         if isinstance(image_rep, PixelImage):
             image_kind = "pixel"
-            self._params = pixel_params_from_state_dict(state_dict)
             use_palette_target = bool(image_rep.use_palette_target)
             image_loss_kinds, image_loss_names = [], []
             for module in image_rep.image_loss():
@@ -149,17 +151,21 @@ class MLXStillEngine:
                         "Use perceptor_backend=mlx or torch.",
                     )
                 image_loss_names.append(str(module))
-            if ("hdr" in image_loss_kinds) != ("hdr_comp" in self._params):
-                raise ValueError(
-                    "hdr loss module and hdr tree buffers disagree — "
-                    "the torch module is off-contract"
-                )
         else:
-            image_kind = "rgb"
-            self._params = rgb_params_from_state_dict(state_dict)
+            # RGBImage or FourierImage (validated above): no palette state,
+            # no image losses
+            image_kind = "fourier" if isinstance(image_rep, FourierImage) else "rgb"
             use_palette_target = False
             image_loss_kinds, image_loss_names = [], []
         self._image_kind = image_kind
+        self._params = self._tree_from_state_dict(state_dict)
+        if image_kind == "pixel" and (
+            ("hdr" in image_loss_kinds) != ("hdr_comp" in self._params)
+        ):
+            raise ValueError(
+                "hdr loss module and hdr tree buffers disagree — "
+                "the torch module is off-contract"
+            )
         self._image_loss_names = tuple(image_loss_names)
         side_x, side_y = image_rep.image_shape
 
@@ -271,10 +277,10 @@ class MLXStillEngine:
                 f"animation_mode={params.animation_mode!r} (still mode only)",
                 "Use perceptor_backend=mlx (the M1 bridge) for animation.",
             )
-        if not isinstance(image_rep, (PixelImage, RGBImage)):
+        if not isinstance(image_rep, (PixelImage, RGBImage, FourierImage)):
             raise _reject(
                 f"image model {type(image_rep).__name__} "
-                "(PixelImage/RGBImage only)",
+                "(PixelImage/RGBImage/FourierImage only)",
                 "Use perceptor_backend=mlx for VQGAN, torch for LlamaGen.",
             )
         if embedder.cutout_sampler not in ("batched", "smart", "full"):
@@ -542,6 +548,22 @@ class MLXStillEngine:
     # frame-boundary + save/restore seams
     # ------------------------------------------------------------------
 
+    def _tree_from_state_dict(self, state_dict: dict) -> dict:
+        """torch ``state_dict`` -> params tree for this engine's image kind.
+        FourierImage's converter needs the logical grid width (rfft2-
+        ambiguous in the state) and decay (construction config) — both read
+        off the live module, so recomputed constants are bit-stable."""
+        if self._image_kind == "pixel":
+            return pixel_params_from_state_dict(state_dict)
+        if self._image_kind == "fourier":
+            image_rep = self._image_rep
+            return fourier_params_from_state_dict(
+                state_dict,
+                width=image_rep.image_shape[0] // image_rep.scale,
+                decay=image_rep.decay,
+            )
+        return rgb_params_from_state_dict(state_dict)
+
     def reset_optimizer(self) -> None:
         """``set_optim(None)`` under mlx_full: fresh-Adam semantics
         (zero moments, zero step count), state structure preserved."""
@@ -558,6 +580,8 @@ class MLXStillEngine:
             )
         if self._image_kind == "pixel":
             state_dict = pixel_state_dict_from_params(self._params)
+        elif self._image_kind == "fourier":
+            state_dict = fourier_state_dict_from_params(self._params)
         else:
             state_dict = rgb_state_dict_from_params(self._params)
         image_rep.load_state_dict(state_dict)
@@ -580,11 +604,7 @@ class MLXStillEngine:
                 "import_params called with a different image_rep than the "
                 "one this engine was built from"
             )
-        state_dict = image_rep.state_dict()
-        if self._image_kind == "pixel":
-            tree = pixel_params_from_state_dict(state_dict)
-        else:
-            tree = rgb_params_from_state_dict(state_dict)
+        tree = self._tree_from_state_dict(image_rep.state_dict())
         if set(tree) != set(self._params):
             raise ValueError(
                 "import_params key drift: torch module has "

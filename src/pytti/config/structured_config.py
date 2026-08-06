@@ -171,9 +171,9 @@ class ConfigSchema:
         default="full", validator=_init_spectrum_chroma_validator
     )
 
-    # Fourier parameterization (Unlimited Palette + torch backend only,
-    # stills only — anything else fails loud at startup naming the v1
-    # scope): optimize the image as a 1/f-scaled Fourier spectrum instead
+    # Fourier parameterization (Unlimited Palette + torch or mlx_full
+    # backend, stills only — anything else fails loud at startup naming
+    # the scope): optimize the image as a 1/f-scaled Fourier spectrum instead
     # of raw pixels (distill.pub 2018 / lucid fft_image; Aphantasia's port
     # proved it for CLIP guidance). Low frequencies (composition) move with
     # large image-space amplitude from step one and texture arrives later,

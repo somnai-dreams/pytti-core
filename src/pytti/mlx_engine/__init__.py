@@ -23,6 +23,11 @@ PIXEL_TRAINABLE_KEYS = ("value", "tensor", "palette")
 PIXEL_CONSTANT_KEYS = ("palette_target", "hdr_comp", "hdr_weight", "norm_weight")
 # RGBImage tree
 RGB_TRAINABLE_KEYS = ("tensor",)
+# FourierImage tree: the trainable rfft2 spectrum plus derived constants
+# (the 1/f^decay scale grid and lucid's color matrix — non-persistent
+# buffers torch-side, recomputed at tree construction).
+FOURIER_TRAINABLE_KEYS = ("spectrum_real", "spectrum_imag")
+FOURIER_CONSTANT_KEYS = ("spectrum_scale", "color_matrix")
 
 # PixelImage.palette_inertia (image_models/pixel.py:190) — a hardcoded
 # class constant, never serialized.
@@ -46,6 +51,10 @@ _LAZY_EXPORTS = {
     "edge_loss": "losses",
     "edges": "losses",
     "erase_keep_mask": "augs",
+    "fourier_decode": "image_models",
+    "fourier_params_from_state_dict": "image_models",
+    "fourier_state_dict_from_params": "image_models",
+    "fourier_update": "image_models",
     # augs.grid_sample_border is a documented local copy of the same
     # gather-bilinear recipe (sampler.py was in flight when S4 was built);
     # deliberately not re-exported here — fold onto sampler's at integration
@@ -81,6 +90,8 @@ _LAZY_EXPORTS = {
 }
 
 __all__ = [
+    "FOURIER_CONSTANT_KEYS",
+    "FOURIER_TRAINABLE_KEYS",
     "PALETTE_INERTIA",
     "PIXEL_CONSTANT_KEYS",
     "PIXEL_TRAINABLE_KEYS",

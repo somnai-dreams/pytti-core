@@ -806,7 +806,7 @@ def _hydra_main(cfg: DictConfig):
         )
 
         # fourier_parameterization rejects every config outside its v1
-        # scope (Unlimited Palette + torch backend, stills, white init)
+        # scope (Unlimited Palette + torch|mlx_full backend, stills, white init)
         # BEFORE any model loads; the fourier_decay inert-knob rule is
         # checked unconditionally (configure_pass repeats this for direct
         # callers and per coarse_to_fine stage).

@@ -2,7 +2,7 @@
 fourier_parameterization (structured_config): optimize the Unlimited
 Palette image as a 1/f-scaled Fourier spectrum (lucid fft_image) instead of
 raw pixels — src/pytti/image_models/fourier.py. v1 scope is Unlimited
-Palette + torch backend + stills + white init; everything else fails loud.
+Palette + torch|mlx_full backend + stills + white init; everything else fails loud.
 
 The numeric contracts tested here: decode stays in [0, 1]; the scale grid
 is the lucid formula's SHAPE at every decay with its induced energy pinned
@@ -441,12 +441,18 @@ def test_off_with_default_decay_passes():
     )
 
 
-@pytest.mark.parametrize("backend", ["mlx", "mlx_full"])
-def test_mlx_backends_fail_loud(backend):
-    with pytest.raises(ValueError, match="torch-only"):
-        validate_fourier_parameterization(
-            **valid_config(perceptor_backend=backend)
-        )
+def test_mlx_full_backend_passes():
+    # the whole-step engine has its own Fourier graph (mlx_engine, gated in
+    # tests/test_mlx_engine_images.py / test_mlx_engine_step.py)
+    validate_fourier_parameterization(
+        **valid_config(perceptor_backend="mlx_full")
+    )
+
+
+def test_mlx_hybrid_backend_fails_loud():
+    # the M1 hybrid is the animation path; fourier is stills-only — refused
+    with pytest.raises(ValueError, match="mlx_full"):
+        validate_fourier_parameterization(**valid_config(perceptor_backend="mlx"))
 
 
 @pytest.mark.parametrize("model", ["Limited Palette", "VQGAN", "LlamaGen"])

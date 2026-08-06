@@ -40,12 +40,17 @@ irfft2 projects them, so encode(decode(spectrum)) canonicalizes the
 spectrum while decode output is preserved — image-domain round-trips are
 the contract.
 
-v1 scope (validate_fourier_parameterization, checked at config time in
+Scope (validate_fourier_parameterization, checked at config time in
 workhorse BEFORE any model loads and again in configure_pass for direct
 callers):
-- image_model='Unlimited Palette' + perceptor_backend='torch' only. The
-  mlx/mlx_full engines compile their own step graphs around pixel-domain
-  parameters; the MLX Fourier graph is a follow-up.
+- image_model='Unlimited Palette', perceptor_backend='torch' or
+  'mlx_full'. The mlx_full whole-step engine compiles its own Fourier
+  decode graph (mlx_engine/image_models.fourier_decode — mx.fft.irfft2's
+  VJP is correct on Metal, eager and compiled; probed + gate-tested
+  2026-08). The M1 'mlx' hybrid stays refused: it is the ANIMATION path
+  (mlx_full owns stills since M2) and fourier_parameterization is
+  stills-only, so the combination has no use case — refusing keeps it
+  unmeasured rather than silently blessed.
 - init_spectrum must stay 'white': the Fourier init IS 1/f-shaped by
   construction (white spectrum coefficients x the 1/f scale), so a shaped
   pixel-domain init request can never be honored — any non-white value is
@@ -192,12 +197,13 @@ def validate_fourier_parameterization(
             "palette/codebook state with no spectral form. Set image_model: "
             "'Unlimited Palette' or fourier_parameterization: false."
         )
-    if perceptor_backend != "torch":
+    if perceptor_backend not in ("torch", "mlx_full"):
         raise ValueError(
-            f"fourier_parameterization is torch-only in v1; "
-            f"perceptor_backend={perceptor_backend!r} compiles its own step "
-            "graph around pixel-domain image parameters (the MLX Fourier "
-            "graph is a follow-up). Set perceptor_backend: torch or "
+            f"fourier_parameterization runs on perceptor_backend torch or "
+            f"mlx_full; perceptor_backend={perceptor_backend!r} (the M1 "
+            "hybrid) is the animation path and this feature is stills-only "
+            "— the combination has no use case and stays unmeasured. Set "
+            "perceptor_backend: torch or mlx_full, or "
             "fourier_parameterization: false."
         )
     if init_spectrum != "white":

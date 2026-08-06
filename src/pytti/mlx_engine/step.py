@@ -52,9 +52,15 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.optimizers
 
-from pytti.mlx_engine import PIXEL_TRAINABLE_KEYS, RGB_TRAINABLE_KEYS
+from pytti.mlx_engine import (
+    FOURIER_TRAINABLE_KEYS,
+    PIXEL_TRAINABLE_KEYS,
+    RGB_TRAINABLE_KEYS,
+)
 from pytti.mlx_engine.augs import AugConfig, apply_augs, draw_aug_params
 from pytti.mlx_engine.image_models import (
+    fourier_decode,
+    fourier_update,
     hdr_loss,
     palette_loss,
     pixel_decode,
@@ -77,7 +83,7 @@ from pytti.mlx_engine.sampler import (
 )
 from pytti.Perceptor.mlx_backend.bridge import mlx_semantic_reduction
 
-IMAGE_KINDS = ("pixel", "rgb")
+IMAGE_KINDS = ("pixel", "rgb", "fourier")
 SAMPLERS = {"batched": pytti_batched, "smart": pytti_smart, "full": pytti_full}
 DIRECT_LOSS_KINDS = ("tv", "mse", "hsv", "edge")
 # geometric mask keys (prompt_spec.GEOMETRIC_MASK_KEYS): "a" == mask_all
@@ -214,8 +220,8 @@ class StepConfig:
             )
         if self.gas < 1:
             raise ValueError(f"gas must be >= 1, got {self.gas}")
-        if self.image_kind == "rgb" and self.image_loss_names != ():
-            raise ValueError("rgb images have no image losses")
+        if self.image_kind != "pixel" and self.image_loss_names != ():
+            raise ValueError(f"{self.image_kind} images have no image losses")
         if unknown := set(self.image_loss_names) - {"hdr", "palette"}:
             raise ValueError(f"unknown image losses {sorted(unknown)}")
 
@@ -225,6 +231,8 @@ def trainable_keys_for(image_kind: str) -> tuple:
         return PIXEL_TRAINABLE_KEYS
     if image_kind == "rgb":
         return RGB_TRAINABLE_KEYS
+    if image_kind == "fourier":
+        return FOURIER_TRAINABLE_KEYS
     raise ValueError(f"unknown image kind {image_kind!r}")
 
 
@@ -400,6 +408,15 @@ def build_step(
             )
 
         update_fn = pixel_update
+    elif cfg.image_kind == "fourier":
+        # the rfft2 layout cannot disambiguate even/odd logical widths —
+        # bake the width as a trace-time constant (fourier_decode docstring)
+        logical_width = cfg.side_x // cfg.scale
+
+        def decode(tree):
+            return fourier_decode(tree, scale=cfg.scale, width=logical_width)
+
+        update_fn = fourier_update
     else:
 
         def decode(tree):
