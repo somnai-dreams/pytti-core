@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import urllib.request
 from pathlib import Path
 
@@ -28,48 +29,60 @@ VQGAN_MODEL = None
 VQGAN_NAME = None
 VQGAN_IS_GUMBEL = None
 
-# migrate these to config files
-VQGAN_CONFIG_URLS = {
-    "imagenet": ["https://heibox.uni-heidelberg.de/f/274fb24ed38341bfa753/?dl=1"],
-    # "coco": ["https://dl.nmkd.de/ai/clip/coco/coco.yaml"],
-    "coco": ["http://batbot.ai/models/VQGAN/coco_first_stage.yaml"],
-    "wikiart": [
-        "http://eaidata.bmk.sh/data/Wikiart_16384/wikiart_f16_16384_8145600.yaml"
-    ],
-    "sflickr": [
-        "https://heibox.uni-heidelberg.de/d/73487ab6e5314cb5adba/files/?p=%2Fconfigs%2F2020-11-09T13-31-51-project.yaml&dl=1"
-    ],
-    "faceshq": [
-        "https://drive.google.com/uc?export=download&id=1fHwGx_hnBtC8nsq7hesJvs-Klv-P0gzT"
-    ],
-    "openimages": [
-        "https://heibox.uni-heidelberg.de/d/2e5662443a6b4307b470/files/?p=%2Fconfigs%2Fmodel.yaml&dl=1"
-    ],
-}
-VQGAN_CHECKPOINT_URLS = {
-    "imagenet": ["https://heibox.uni-heidelberg.de/f/867b05fc8c4841768640/?dl=1"],
-    # "coco": ["https://dl.nmkd.de/ai/clip/coco/coco.ckpt"],
-    "coco": ["http://batbot.ai/models/VQGAN/coco_first_stage.ckpt"],
-    "wikiart": [
-        "http://eaidata.bmk.sh/data/Wikiart_16384/wikiart_f16_16384_8145600.ckpt"
-    ],
-    "sflickr": [
-        "https://heibox.uni-heidelberg.de/d/73487ab6e5314cb5adba/files/?p=%2Fcheckpoints%2Flast.ckpt&dl=1"
-    ],
-    "faceshq": [
-        "https://app.koofr.net/content/links/a04deec9-0c59-4673-8b37-3d696fe63a5d/files/get/last.ckpt?path=%2F2020-11-13T21-41-45_faceshq_transformer%2Fcheckpoints%2Flast.ckpt"
-    ],
-    "openimages": [
-        "https://heibox.uni-heidelberg.de/d/2e5662443a6b4307b470/files/?p=%2Fckpts%2Flast.ckpt&dl=1"
-    ],
+# Self-owned preservation mirror (2026-08-06 rescue: the original hosts were
+# decaying — wikiart's eaidata.bmk.sh is dead; every file below was recovered,
+# sha256-verified against its provenance, and re-hosted). Revision-pinned for
+# immutability; provenance + hashes documented in the repo's manifest.json.
+VQGAN_MIRROR_REPO = "Somnai/pytti-vqgan-checkpoints"
+VQGAN_MIRROR_REVISION = "debc22c8f285c7734980c464ff992d335dde6e9a"
+
+# model_name -> (ckpt sha256, yaml sha256), from the mirror's manifest.json.
+VQGAN_SHA256 = {
+    "imagenet": (
+        "845a68805098cb666420d5db93df53f3a3b6dd443e6dd85c05759c5b998cd663",
+        "00e2c6189926f1d89ecfef73e9598db77981c1982f0555fbade963ffd16143c7",
+    ),
+    "coco": (
+        "106cc20fde571df14afc4349d62218d8213cf47177c682ecaa78a8c28b12f9de",
+        "17d0c2d9fda59eccade2a6070d833804b759dc817da42c2268be8cf1eb047676",
+    ),
+    "wikiart": (
+        "bd08bb46301f98be1712bb2be9f8868cea30b53137cd985d4d6e8da8b3e02c36",
+        "6e78241d2828ff35b8381839ce249c24a6c468ed429760d33a25e98e7f24499a",
+    ),
+    "sflickr": (
+        "8a8adea3da8dab412675772831370dd948e0aa97bb11a9488a2f328b58dbc929",
+        "c27f012996f3f1f02580f063be47fd60bdd8528efb04d7318b2cbe8a86505b1b",
+    ),
+    "faceshq": (
+        "3274bba51bd565c90990bbcf7bb5dad0b9b95a6a77011980afc4c3cfc4d1cad1",
+        "726ca97fb266c3c744f26e5aba2e579a51e310eee711a15f22224031dfdd57e2",
+    ),
+    "openimages": (
+        "5cd6c74810ab97e00e942c25403f73afc081e8b19987b31ec0d9ff5b68e7ab14",
+        "91110bab325067b37f85d1e75895a837d59c292bae4f3097f80c518714d5caff",
+    ),
 }
 
 
-def _download(url, dest, timeout=60):
+def _mirror_url(model_name: str, ext: str) -> str:
+    return (
+        f"https://huggingface.co/{VQGAN_MIRROR_REPO}/resolve/"
+        f"{VQGAN_MIRROR_REVISION}/{model_name}/{model_name}.{ext}"
+    )
+
+
+VQGAN_CONFIG_URLS = {name: [_mirror_url(name, "yaml")] for name in VQGAN_SHA256}
+VQGAN_CHECKPOINT_URLS = {name: [_mirror_url(name, "ckpt")] for name in VQGAN_SHA256}
+
+
+def _download(url, dest, timeout=60, expected_sha256=None):
     """
     Download url to dest atomically (via a .part temp file, renamed on
     success), so an interrupted download can never leave a truncated file
-    that later passes the exists() cache check.
+    that later passes the exists() cache check. With expected_sha256, the
+    temp file is hash-verified before the rename — a corrupted or tampered
+    download never lands under the cached name.
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +91,7 @@ def _download(url, dest, timeout=60):
 
     req = urllib.request.Request(url, headers={"User-Agent": "pytti-core"})
     tmp = dest.with_suffix(dest.suffix + ".part")
+    digest = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=timeout) as source:
         length = source.info().get("Content-Length")
         total = int(length) if length is not None else None
@@ -88,12 +102,20 @@ def _download(url, dest, timeout=60):
                 if not buffer:
                     break
                 output.write(buffer)
+                digest.update(buffer)
                 progress.update(len(buffer))
     if total is not None and tmp.stat().st_size != total:
         tmp.unlink()
         raise OSError(
             f"Download of {url} was truncated "
             f"({tmp.stat().st_size if tmp.exists() else 0}/{total} bytes)"
+        )
+    if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+        actual = digest.hexdigest()
+        tmp.unlink()
+        raise OSError(
+            f"Download of {url} failed sha256 verification "
+            f"(expected {expected_sha256}, got {actual})"
         )
     tmp.rename(dest)
     return True
@@ -329,7 +351,9 @@ class VQGANImage(EMAImage):
 
             url = VQGAN_CONFIG_URLS[model_name][0]
 
-            if not _download(url, vqgan_config):
+            if not _download(
+                url, vqgan_config, expected_sha256=VQGAN_SHA256[model_name][1]
+            ):
                 logger.critical(
                     f"ERROR: VQGAN model {model_name} config failed to download! Please contact model host or find a new one."
                 )
@@ -342,7 +366,9 @@ class VQGANImage(EMAImage):
 
             url = VQGAN_CHECKPOINT_URLS[model_name][0]
 
-            if not _download(url, vqgan_checkpoint):
+            if not _download(
+                url, vqgan_checkpoint, expected_sha256=VQGAN_SHA256[model_name][0]
+            ):
                 logger.critical(
                     f"ERROR: VQGAN model {model_name} checkpoint failed to download! Please contact model host or find a new one."
                 )
