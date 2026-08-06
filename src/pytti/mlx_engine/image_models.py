@@ -326,12 +326,31 @@ def palette_loss(params: dict) -> tuple[mx.array, mx.array]:
     _validate_pixel_tree(params)
     tensor = params["tensor"]  # [n_palettes, h, w]
     n_palettes = tensor.shape[0]
+    if n_palettes == 1:
+        # Cross-palette decorrelation is undefined for a single palette:
+        # softmax over a size-1 axis is identically 1.0, so sigma == 0
+        # exactly and both terms below are 0/0 and 1/0. Eager mlx yields
+        # NaN; the compiled step's fused variance reduction can instead
+        # accumulate rounding residue at larger N, manufacturing a finite
+        # garbage constant with an exactly-zero gradient. Either way the
+        # loss is meaningless at n=1 -> graph-connected exact zero
+        # (mirrors torch PaletteLoss.forward; shapes are static under
+        # mx.compile, so this python branch resolves at trace time).
+        loss_raw = mx.sum(tensor) * 0.0
+        return loss_raw * params["norm_weight"], loss_raw
     t = mx.softmax(
         mx.transpose(tensor, (1, 2, 0)).reshape(-1, n_palettes), axis=-1
     )  # [N, n]
     big_n = t.shape[0]
     mu = mx.mean(t, axis=0, keepdims=True)
-    sigma = mx.std(t, axis=0, keepdims=True, ddof=1)  # torch .std() is unbiased
+    # sqrt(var + 1e-16): guards a mid-run degenerate state (all logits
+    # equal -> variance exactly 0) from NaN. Unlike mx.maximum(std, eps),
+    # whose vjp still propagates NaN through std at zero variance, this
+    # keeps the gradient finite; it is bit-identical in fp32 whenever
+    # var > ~1e-9 (healthy sigma ~ 0.1) and matches the torch guard's
+    # sigma == 1e-8 at the degenerate point. torch .std()/.var() and
+    # ddof=1 are both unbiased.
+    sigma = mx.sqrt(mx.var(t, axis=0, keepdims=True, ddof=1) + 1e-16)
     centered = t - mu
     s = (centered.T @ centered) / (sigma * sigma.T * big_n)
     s = s - mx.diag(mx.diagonal(s))

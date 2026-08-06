@@ -59,6 +59,15 @@ class PaletteLoss(nn.Module):
         :return: The loss and the loss_raw.
         """
         if isinstance(input, PixelImage):
+            if self.n_palettes == 1:
+                # Cross-palette decorrelation is undefined for a single
+                # palette: softmax over a size-1 axis is identically 1.0,
+                # so sigma == 0 exactly and both terms below divide by
+                # zero (0/0 -> NaN, poisoning every parameter through
+                # Adam within two steps -> solid black frames). Nothing
+                # to decorrelate -> graph-connected exact zero.
+                loss_raw = input.tensor.sum() * 0.0
+                return loss_raw * self.weight, loss_raw
             tensor = (
                 input.tensor.movedim(0, -1)
                 .contiguous()
@@ -67,7 +76,12 @@ class PaletteLoss(nn.Module):
             )
             N, n = tensor.shape
             mu = tensor.mean(dim=0, keepdim=True)
-            sigma = tensor.std(dim=0, keepdim=True)
+            # clamp_min guards a mid-run degenerate state (all logits
+            # equal across pixels -> sigma == 0 exactly) from NaN; it is
+            # bit-identical whenever sigma > eps (healthy sigma ~ 0.1),
+            # and torch masks the backward through the clamp, so the
+            # gradient stays finite at the degenerate point too.
+            sigma = tensor.std(dim=0, keepdim=True).clamp_min(1e-8)
             tensor = tensor.sub(mu)
             # SVD
             S = (tensor.transpose(0, 1) @ tensor).div(sigma * sigma.transpose(0, 1) * N)
