@@ -39,6 +39,14 @@ def _init_spectrum_falloff_validator(self, attribute, value):
     validate_spectrum_falloff(value)
 
 
+def _init_spectrum_chroma_validator(self, attribute, value):
+    # deferred import: keeps this schema module import-light; fires at
+    # attrs instantiation (OmegaConf.to_object), long after import time
+    from pytti.image_models.init_noise import validate_spectrum_chroma
+
+    validate_spectrum_chroma(value)
+
+
 def _coarse_stages_validator(self, attribute, value):
     # deferred import: keeps this schema module import-light; fires at
     # attrs instantiation (OmegaConf.to_object), long after import time
@@ -116,6 +124,23 @@ class ConfigSchema:
     # (init_noise.MAX_SPECTRUM_FALLOFF) at compose time.
     init_spectrum_falloff: float = field(
         default=1.0, validator=_init_spectrum_falloff_validator
+    )
+    # Chroma structure of the shaped inits (pink/fractal). Independent
+    # per-channel fields leave low-frequency COLOR blobs that CLIP never
+    # cleans up and that steer the final palette. full = the original
+    # independent per-channel fields, bit-for-bit (the default — existing
+    # seeds stay reproducible). natural = fields drawn in a decorrelated
+    # basis and mapped through lucid's ImageNet color matrix: mostly luma,
+    # faint chroma. mono = one shaped luminance field broadcast to all
+    # channels: full spatial prior, zero chroma. white and gray ignore it
+    # (no low-frequency chroma to shape). Limited Palette has no RGB
+    # channels at init, so there the knob governs the palette-selection
+    # logit planes instead: mono = plain uniform logits (no pre-committed
+    # palette regions), natural = shaped logits at reduced amplitude
+    # (init_noise.NATURAL_TENSOR_AMPLITUDE), full = original full-strength
+    # shaped logits.
+    init_spectrum_chroma: str = field(
+        default="full", validator=_init_spectrum_chroma_validator
     )
 
     width: int = 512

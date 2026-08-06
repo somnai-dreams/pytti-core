@@ -379,7 +379,10 @@ def _minimal_params(**overrides):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        init_spectrum="pink", init_spectrum_falloff=1.0, **overrides
+        init_spectrum="pink",
+        init_spectrum_falloff=1.0,
+        init_spectrum_chroma="full",
+        **overrides,
     )
 
 

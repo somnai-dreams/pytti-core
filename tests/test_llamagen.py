@@ -200,6 +200,7 @@ def test_workhorse_rejects_llamagen_on_mlx_backends():
             perceptor_backend=backend,
             init_spectrum="white",
             init_spectrum_falloff=1.0,
+            init_spectrum_chroma="full",
         )
         with pytest.raises(ValueError, match="torch-only"):
             configure_pass(

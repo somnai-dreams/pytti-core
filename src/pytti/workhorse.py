@@ -258,6 +258,9 @@ def configure_pass(
         has_init_image=init_image_pil is not None,
         restore=restore,
     )
+    # the chroma knob needs no resolving: it only shapes shaped inits, and
+    # a spectrum resolved to 'white' never consults it
+    init_spectrum_chroma = params.init_spectrum_chroma
 
     # set up image
     if params.image_model == "Limited Palette":
@@ -276,6 +279,7 @@ def configure_pass(
             random_palette=params.random_initial_palette,
             init_spectrum=init_spectrum,
             init_spectrum_falloff=init_spectrum_falloff,
+            init_spectrum_chroma=init_spectrum_chroma,
         )
         if params.target_palette.strip() != "":
             img.set_palette_target(
@@ -288,6 +292,7 @@ def configure_pass(
         img.encode_random(
             init_spectrum=init_spectrum,
             init_spectrum_falloff=init_spectrum_falloff,
+            init_spectrum_chroma=init_spectrum_chroma,
         )
     elif params.image_model == "VQGAN":
         # categorical token init has no spectrum to shape: reject a shaped
@@ -305,6 +310,7 @@ def configure_pass(
         img.encode_random(
             init_spectrum=init_spectrum,
             init_spectrum_falloff=init_spectrum_falloff,
+            init_spectrum_chroma=init_spectrum_chroma,
         )
     elif params.image_model == "LlamaGen":
         if params.perceptor_backend != "torch":
@@ -325,6 +331,7 @@ def configure_pass(
         img.encode_random(
             init_spectrum=init_spectrum,
             init_spectrum_falloff=init_spectrum_falloff,
+            init_spectrum_chroma=init_spectrum_chroma,
         )
     else:
         raise ValueError(

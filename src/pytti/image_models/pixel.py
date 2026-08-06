@@ -11,7 +11,11 @@ from torchvision.transforms import functional as TF
 from pytti import named_rearrange, replace_grad, vram_usage_mode
 from pytti.device import default_device, memory_format_for
 from pytti.image_models.differentiable_image import DifferentiableImage
-from pytti.image_models.init_noise import shaped_init_field
+from pytti.image_models.init_noise import (
+    NATURAL_TENSOR_AMPLITUDE,
+    shaped_init_field,
+    validate_spectrum_chroma,
+)
 from pytti.LossAug.HSVLossClass import HSVLoss
 
 
@@ -482,20 +486,39 @@ class PixelImage(DifferentiableImage):
 
     @torch.no_grad()
     def encode_random(
-        self, random_palette=False, init_spectrum="white", init_spectrum_falloff=1.0
+        self,
+        random_palette=False,
+        init_spectrum="white",
+        init_spectrum_falloff=1.0,
+        init_spectrum_chroma="full",
     ):
         """
         Sets the value and tensor to random noise shaped per config
         ``init_spectrum`` (see image_models/init_noise.py). 'white' keeps
-        the original in-place uniform draws bit-for-bit. Shaped spectra
-        draw one field for the value plane (the brightness that is visible
-        at step 0) and an independent field per palette plane for the
-        selection logits — spatially-coherent palette regions instead of
-        per-pixel salt.
+        the original in-place uniform draws bit-for-bit and ignores the
+        chroma knob. Shaped spectra draw one full-strength field for the
+        value plane (the brightness that is visible at step 0) and handle
+        the per-palette-plane selection logits per
+        ``init_spectrum_chroma``. PixelImage has no RGB channels at init —
+        palettes start as identical gray ramps, and color enters through
+        palette learning steered by the selection fields (coherent
+        selection regions become color regions as the palettes diverge) —
+        so here the chroma knob governs selection-logit amplitude, not a
+        color basis:
+
+        - 'full'    — an independent shaped field per palette plane, the
+          pre-knob behavior bit-for-bit (full-strength pre-committed
+          palette regions).
+        - 'natural' — shaped logit planes blended toward flat mid-gray by
+          NATURAL_TENSOR_AMPLITUDE (a faint spatial prior on palette
+          selection). Consumes the exact same RNG stream as 'full'.
+        - 'mono'    — the ORIGINAL uniform white draw for the logits: full
+          spatial prior on brightness, zero pre-committed palette regions.
 
         :param random_palette: If True, the palette is initialized to random values, defaults to False
         (optional)
         """
+        validate_spectrum_chroma(init_spectrum_chroma)
         if init_spectrum == "white":
             self.value.uniform_()
             self.tensor.uniform_()
@@ -505,14 +528,21 @@ class PixelImage(DifferentiableImage):
                 1, height, width, init_spectrum, init_spectrum_falloff, self.device
             )
             self.value.copy_(value_field.squeeze(0))
-            logit_fields = shaped_init_field(
-                self.n_palettes,
-                height,
-                width,
-                init_spectrum,
-                init_spectrum_falloff,
-                self.device,
-            )
-            self.tensor.copy_(logit_fields)
+            if init_spectrum_chroma == "mono":
+                self.tensor.uniform_()
+            else:
+                logit_fields = shaped_init_field(
+                    self.n_palettes,
+                    height,
+                    width,
+                    init_spectrum,
+                    init_spectrum_falloff,
+                    self.device,
+                )
+                if init_spectrum_chroma == "natural":
+                    logit_fields = 0.5 + NATURAL_TENSOR_AMPLITUDE * (
+                        logit_fields - 0.5
+                    )
+                self.tensor.copy_(logit_fields)
         if random_palette:
             self.palette.uniform_(to=self.palette_inertia)

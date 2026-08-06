@@ -7,7 +7,10 @@ from torchvision.transforms import functional as TF
 from pytti import clamp_with_grad
 from pytti.device import default_device
 from pytti.image_models import DifferentiableImage
-from pytti.image_models.init_noise import shaped_init_field
+from pytti.image_models.init_noise import (
+    shaped_init_field,
+    validate_spectrum_chroma,
+)
 
 
 class RGBImage(DifferentiableImage):
@@ -61,18 +64,34 @@ class RGBImage(DifferentiableImage):
         )
 
     @torch.no_grad()
-    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+    def encode_random(
+        self,
+        init_spectrum="white",
+        init_spectrum_falloff=1.0,
+        init_spectrum_chroma="full",
+    ):
         """
         Overwrite the image with noise shaped per config ``init_spectrum``
         (see image_models/init_noise.py). 'white' keeps the original
-        in-place uniform draw bit-for-bit; the shaped spectra draw an
-        independent field per RGB channel on the logical grid.
+        in-place uniform draw bit-for-bit and ignores the chroma knob (iid
+        uniform has no low-frequency chroma to remove). The shaped spectra
+        draw fields on the logical grid with cross-channel structure per
+        ``init_spectrum_chroma``: 'full' = independent per-RGB-channel
+        fields (the pre-knob behavior, bit-for-bit), 'natural' = lucid
+        ImageNet color statistics, 'mono' = one luminance field broadcast.
         """
+        validate_spectrum_chroma(init_spectrum_chroma)
         if init_spectrum == "white":
             self.tensor.uniform_()
             return
         height, width = self.tensor.shape[-2:]
         field = shaped_init_field(
-            3, height, width, init_spectrum, init_spectrum_falloff, self.device
+            3,
+            height,
+            width,
+            init_spectrum,
+            init_spectrum_falloff,
+            self.device,
+            init_spectrum_chroma=init_spectrum_chroma,
         )
         self.tensor.copy_(field.unsqueeze(0))

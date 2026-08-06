@@ -80,13 +80,19 @@ class DifferentiableImage(nn.Module):
         """
         raise NotImplementedError
 
-    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+    def encode_random(
+        self,
+        init_spectrum="white",
+        init_spectrum_falloff=1.0,
+        init_spectrum_chroma="full",
+    ):
         """
         overwrites this image with random noise, shaped per the config
-        ``init_spectrum`` knob (see image_models/init_noise.py). Workhorse
-        always passes both kwargs, so every subclass must accept them; a
-        model whose random init has no spectrum to shape rejects non-'white'
-        loudly via require_white_init instead of dropping the argument.
+        ``init_spectrum`` / ``init_spectrum_chroma`` knobs (see
+        image_models/init_noise.py). Workhorse always passes all three
+        kwargs, so every subclass must accept them; a model whose random
+        init has no spectrum to shape rejects non-'white' loudly via
+        require_white_init instead of dropping the argument.
         """
         raise NotImplementedError
 

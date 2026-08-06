@@ -19,7 +19,10 @@ from pytti import (
 )
 from pytti.config.model_names import VQGAN_MODEL_ALIASES, VQGAN_MODEL_NAMES
 from pytti.image_models import EMAImage
-from pytti.image_models.init_noise import require_white_init
+from pytti.image_models.init_noise import (
+    require_white_init,
+    validate_spectrum_chroma,
+)
 
 VQGAN_MODEL = None
 VQGAN_NAME = None
@@ -268,7 +271,16 @@ class VQGANImage(EMAImage):
         return z_q
 
     @torch.no_grad()
-    def encode_random(self, init_spectrum="white", init_spectrum_falloff=1.0):
+    def encode_random(
+        self,
+        init_spectrum="white",
+        init_spectrum_falloff=1.0,
+        init_spectrum_chroma="full",
+    ):
+        # init_spectrum_chroma only shapes shaped (non-white) inits, and
+        # only 'white' passes the guard here — accepted (workhorse always
+        # passes it), validated, never consulted
+        validate_spectrum_chroma(init_spectrum_chroma)
         require_white_init("VQGANImage", init_spectrum)
         self.tensor.set_(self.rand_latent())
         self.reset()
