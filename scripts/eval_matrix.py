@@ -36,6 +36,33 @@ Win-rates anchor to --baseline (or, when sweeping, to the sole --legs leg).
 --subset N keeps the first N battery prompts for cheap sweeps. Always plan
 first: --dry-run prints the full cell matrix + commands and renders nothing.
 
+Usage (chained legs — a leg that starts FROM another leg's output, e.g.
+LlamaGen structure under a pixel-space finish):
+  .venv/bin/python scripts/eval_matrix.py \\
+      --legs lg-under:image_model=LlamaGen \\
+      --legs finish:init_from=lg-under,direct_init_weight=1
+
+init_from=SOURCELEG is a pseudo-override consumed by eval_matrix — never
+passed to the render config. Each cell of the dependent leg gets
+init_image=<abs path to SOURCELEG's same-cell final frame> in its generated
+conf; the leg's other overrides ride normally, and nothing else is implied
+(no magic defaults: absent direct_init_weight means the engine's '' = pure
+init carry). Source legs render before dependents (topological, any depth);
+an unknown source or a cycle dies at argument-parse time. A dependent cell
+skips like any other when its final frame exists; if it must render and its
+source cell's final frame is missing it fails loud naming the source cell —
+it never renders from a stale or absent init. Dependent legs are ordinary
+legs to judging and the compare sheets.
+
+STALENESS RULE (chained resumability): cell identity is the generated conf
+text, nothing else. A completed dependent cell is therefore never
+invalidated by its source — the dependent's conf pins the source's final
+frame path, the source's own conf is pinned too, and renders are seeded, so
+a re-rendered source reproduces the same cell. Wiping a source's workdir
+re-renders the source only; wipe the dependent's workdir too to force a
+re-chain. Retargeting a chain (or any leg redefinition) under the same leg
+name changes the conf text and dies loud at the resumability check.
+
 Per cell: `python -m pytti.workhorse` renders in its own scratch workspace
 under /tmp/pytti-eval/<tier>/<leg>/<prompt>_s<seed>/ (detached process, log
 polled; a crash is fatal with the log tail). Resumable: a cell whose final
@@ -253,12 +280,17 @@ class LegSpec:
     overrides: tuple[tuple[str, str], ...]  # ordered (key, raw value string)
     source: str  # "explicit" | "baseline" | "sweep"
     sweep: tuple[tuple[str, str], ...] = ()  # swept (field, value) assignment
+    # chained leg: name of the leg whose same-cell final frame seeds this
+    # leg's init_image (pseudo-override, consumed here, never in the conf)
+    init_from: str | None = None
 
     def overrides_dict(self) -> dict[str, str]:
         return dict(self.overrides)
 
     def overrides_text(self) -> str:
-        return ", ".join(f"{k}={v}" for k, v in self.overrides) or "(schema defaults)"
+        parts = [f"init_from: {self.init_from}"] if self.init_from is not None else []
+        parts += [f"{k}={v}" for k, v in self.overrides]
+        return ", ".join(parts) or "(schema defaults)"
 
 
 def _validate_override_key(key: str, context: str) -> None:
@@ -279,21 +311,44 @@ def _validate_judge_held_out(key: str, raw: str, context: str) -> None:
         )
 
 
-def parse_overrides(text: str, context: str) -> tuple[tuple[str, str], ...]:
+INIT_FROM_KEY = "init_from"
+
+
+def parse_overrides(
+    text: str, context: str
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """Split key=value overrides; the init_from pseudo-override is extracted
+    (consumed by eval_matrix, never passed to the render config)."""
     pairs: list[tuple[str, str]] = []
+    init_from: str | None = None
     seen: set[str] = set()
     for item in text.split(","):
         key, sep, value = item.partition("=")
         key, value = key.strip(), value.strip()
         if not sep or not key or not value:
             die(f"{context}: override {item!r} must be key=value")
+        if key == INIT_FROM_KEY:
+            if init_from is not None:
+                die(f"{context}: duplicate override key {INIT_FROM_KEY!r}")
+            if not _LABEL_RE.match(value):
+                die(
+                    f"{context}: init_from {value!r} must be a leg name "
+                    f"matching {_LABEL_RE.pattern}"
+                )
+            init_from = value
+            continue
         _validate_override_key(key, context)
         _validate_judge_held_out(key, value, context)
         if key in seen:
             die(f"{context}: duplicate override key {key!r}")
         seen.add(key)
         pairs.append((key, value))
-    return tuple(pairs)
+    if init_from is not None and "init_image" in seen:
+        die(
+            f"{context}: init_from and an explicit init_image override "
+            "conflict — the harness owns init_image for chained legs"
+        )
+    return tuple(pairs), init_from
 
 
 def parse_leg_spec(spec: str, source: str = "explicit") -> LegSpec:
@@ -302,8 +357,8 @@ def parse_leg_spec(spec: str, source: str = "explicit") -> LegSpec:
         die(f"leg spec {spec!r}: name {name!r} must match {_LABEL_RE.pattern}")
     if sep and not rest.strip():
         die(f"leg spec {spec!r}: empty overrides after ':'")
-    overrides = parse_overrides(rest, f"leg {name!r}") if sep else ()
-    return LegSpec(name=name, overrides=overrides, source=source)
+    overrides, init_from = parse_overrides(rest, f"leg {name!r}") if sep else ((), None)
+    return LegSpec(name=name, overrides=overrides, source=source, init_from=init_from)
 
 
 @dataclass(frozen=True)
@@ -352,8 +407,41 @@ def expand_sweeps(sweeps: list[SweepField]) -> list[LegSpec]:
 
 @dataclass(frozen=True)
 class LegSet:
-    legs: tuple[LegSpec, ...]
+    legs: tuple[LegSpec, ...]  # CLI order — reports/sheets keep this order
     baseline: str | None  # leg name that win-rate-vs-baseline anchors to
+
+
+def render_order(legs: tuple[LegSpec, ...]) -> tuple[LegSpec, ...]:
+    """Dependency (topological) order: every init_from source before its
+    dependents, at any chain depth; original order is preserved otherwise,
+    so this is the identity for non-chained leg sets. Dies loud on a cycle."""
+    by_name = {leg.name: leg for leg in legs}
+    ordered: list[LegSpec] = []
+    done: set[str] = set()
+    visiting: list[str] = []
+
+    def visit(leg: LegSpec) -> None:
+        if leg.name in done:
+            return
+        if leg.name in visiting:
+            chain = " -> ".join([*visiting[visiting.index(leg.name) :], leg.name])
+            die(f"init_from cycle: {chain}")
+        visiting.append(leg.name)
+        if leg.init_from is not None:
+            source = by_name.get(leg.init_from)
+            if source is None:
+                die(
+                    f"leg {leg.name!r}: init_from source {leg.init_from!r} "
+                    "is not a leg in this run"
+                )
+            visit(source)
+        visiting.pop()
+        done.add(leg.name)
+        ordered.append(leg)
+
+    for leg in legs:
+        visit(leg)
+    return tuple(ordered)
 
 
 def assemble_legs(
@@ -367,6 +455,14 @@ def assemble_legs(
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
         die(f"duplicate leg names {dupes}")
+    all_names = set(names)
+    for leg in ordered:
+        if leg.init_from is not None and leg.init_from not in all_names:
+            die(
+                f"leg {leg.name!r}: init_from source {leg.init_from!r} is not "
+                f"a leg in this run (legs: {sorted(all_names)})"
+            )
+    render_order(tuple(ordered))  # cycles die here, before any rendering
     if baseline is not None:
         base_name = baseline.name
     elif sweeps and len(explicit) == 1:
@@ -391,6 +487,9 @@ class Cell:
     height: int
     steps: int
     save_every: int
+    # chained leg: absolute path to the source leg's same-cell final frame,
+    # injected into this cell's conf as init_image (None = unchained)
+    init_image: Path | None = None
 
     @property
     def name(self) -> str:
@@ -440,8 +539,14 @@ def build_plan(
         if not 1 <= subset <= len(prompts):
             die(f"--subset {subset} out of range 1..{len(prompts)}")
         prompts = prompts[:subset]
+    # tier-scoped so screening and full campaigns coexist (and a tier
+    # switch can never trip the conf-mismatch resumability check)
+    tier_root = root / tier.name
     cells: list[Cell] = []
-    for leg in leg_set.legs:
+    by_key: dict[CellKey, Cell] = {}
+    # cells in render (topological) order: a chained cell's source cell is
+    # always planned — and later rendered — before it
+    for leg in render_order(leg_set.legs):
         steps = leg_int(leg, "steps_per_scene", tier.steps)
         save_every = leg_int(leg, "save_every", tier.save_every)
         if steps % save_every:
@@ -452,46 +557,62 @@ def build_plan(
         for prompt in prompts:
             width, height = tier.dims[prompt.aspect]
             for seed in battery.seeds:
-                cells.append(
-                    Cell(
-                        leg=leg,
-                        prompt=prompt,
-                        seed=seed,
-                        width=width,
-                        height=height,
-                        steps=steps,
-                        save_every=save_every,
-                    )
+                init_image: Path | None = None
+                if leg.init_from is not None:
+                    source = by_key.get((leg.init_from, prompt.id, seed))
+                    if source is None:
+                        die(
+                            f"leg {leg.name!r}: no planned source cell "
+                            f"{leg.init_from}/{prompt.id}_s{seed} (render order bug)"
+                        )
+                    init_image = _final_frame_path(tier_root, source)
+                cell = Cell(
+                    leg=leg,
+                    prompt=prompt,
+                    seed=seed,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    save_every=save_every,
+                    init_image=init_image,
                 )
+                cells.append(cell)
+                by_key[cell_key(cell)] = cell
     return Plan(
         battery=battery,
         prompts=prompts,
         legs=leg_set,
         tier=tier,
-        # tier-scoped so screening and full campaigns coexist (and a tier
-        # switch can never trip the conf-mismatch resumability check)
-        root=root / tier.name,
+        root=tier_root,
         cells=tuple(cells),
     )
 
 
+def _cell_workdir(root: Path, cell: Cell) -> Path:
+    return root / cell.leg.name / cell.name
+
+
 def cell_workdir(plan: Plan, cell: Cell) -> Path:
-    return plan.root / cell.leg.name / cell.name
+    return _cell_workdir(plan.root, cell)
 
 
 def cell_conf_path(plan: Plan, cell: Cell) -> Path:
     return cell_workdir(plan, cell) / "config" / "conf" / f"{cell.name}.yaml"
 
 
-def final_frame_path(plan: Plan, cell: Cell) -> Path:
+def _final_frame_path(root: Path, cell: Cell) -> Path:
     # pytti.ImageGuide.frame_filename: {namespace}_{n:04d}.png, n = step/save_every
     return (
-        cell_workdir(plan, cell)
+        _cell_workdir(root, cell)
         / "run"
         / "images_out"
         / cell.name
         / f"{cell.name}_{cell.final_index:04d}.png"
     )
+
+
+def final_frame_path(plan: Plan, cell: Cell) -> Path:
+    return _final_frame_path(plan.root, cell)
 
 
 def cell_conf_text(cell: Cell, tier: Tier) -> str:
@@ -505,6 +626,9 @@ def cell_conf_text(cell: Cell, tier: Tier) -> str:
         "backups": 0,
         "file_namespace": cell.name,
     }
+    if cell.init_image is not None:
+        # chained leg: start from the source leg's same-cell final frame
+        cfg["init_image"] = str(cell.init_image)
     for key, raw in cell.leg.overrides:
         cfg[key] = yaml.safe_load(raw)
     header = (
@@ -617,7 +741,13 @@ def prepare_cell_workspace(plan: Plan, cell: Cell) -> Path:
 
 
 def cell_is_done(plan: Plan, cell: Cell) -> bool:
-    """Resumability check: final frame exists AND its conf matches this plan."""
+    """Resumability check: final frame exists AND its conf matches this plan.
+
+    Chained cells carry no extra condition: the conf pins the source's final
+    frame path and the source cell's conf is pinned by its own check, so a
+    done dependent is valid even if the source final was wiped or re-rendered
+    since (seeded renders; conf text = cell identity — see STALENESS RULE in
+    the module docstring)."""
     final = final_frame_path(plan, cell)
     if not final.is_file():
         return False
@@ -643,7 +773,21 @@ def _last_progress(log_path: Path) -> str:
     return f"step {n}/{total}"
 
 
+def require_source_final(cell: Cell) -> None:
+    """A chained cell never renders from a stale or absent init: its source
+    cell's final frame must exist on disk before this cell may render."""
+    if cell.init_image is None:
+        return
+    if not cell.init_image.is_file():
+        die(
+            f"{cell.leg.name}/{cell.name}: source cell "
+            f"{cell.leg.init_from}/{cell.name} has no final frame at "
+            f"{cell.init_image} — refusing to render from a missing init"
+        )
+
+
 def run_cell(plan: Plan, cell: Cell) -> None:
+    require_source_final(cell)
     workdir = prepare_cell_workspace(plan, cell)
     log_path = workdir / "render.log"
     cmd = cell_command(plan, cell, sys.executable)
@@ -1230,6 +1374,7 @@ def write_metrics_json(
                 "source": leg.source,
                 "overrides": leg.overrides_dict(),
                 "sweep": dict(leg.sweep),
+                "init_from": leg.init_from,
             }
             for leg in plan.legs.legs
         ],
@@ -1314,7 +1459,8 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="NAME[:K=V,K=V...]",
-        help="a named leg of overrides on the screening base (repeatable)",
+        help="a named leg of overrides on the screening base (repeatable); "
+        "init_from=SOURCELEG chains this leg onto another leg's final frames",
     )
     parser.add_argument(
         "--baseline",
