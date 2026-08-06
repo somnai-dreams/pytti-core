@@ -378,12 +378,20 @@ def _minimal_params(**overrides):
     # on AttributeError instead of the guard's ValueError
     from types import SimpleNamespace
 
-    return SimpleNamespace(
+    fields = dict(
         init_spectrum="pink",
         init_spectrum_falloff=1.0,
         init_spectrum_chroma="full",
-        **overrides,
+        # read by the fourier validation at configure_pass top (fires
+        # before the token-model guard these tests target)
+        fourier_parameterization=False,
+        fourier_decay=1.0,
+        perceptor_backend="torch",
+        structure_annealing=False,
+        animation_mode="off",
     )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 def test_workhorse_rejects_vqgan_shaped_init_before_model_load():

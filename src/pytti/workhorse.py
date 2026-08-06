@@ -44,11 +44,13 @@ from pytti.config import structured_config  # noqa: F401
 from pytti.files import get_last_file, get_next_file
 from pytti.image_models import (
     DifferentiableImage,
+    FourierImage,
     LlamaGenImage,
     PixelImage,
     RGBImage,
     VQGANImage,
 )
+from pytti.image_models.fourier import validate_fourier_parameterization
 from pytti.image_models.init_noise import require_white_init, resolve_init_spectrum
 from pytti.ImageGuide import DirectImageGuide
 from pytti.LossAug.LossOrchestratorClass import (
@@ -248,6 +250,20 @@ def configure_pass(
     re-fitting a palette from scratch. A user-locked palette stays locked to
     the carried colors; an unlocked one resumes learning after the fit.
     """
+    # fourier_parameterization rejects every config it has no v1 semantics
+    # for, on the CONFIGURED values (do_run pre-validates the same surface
+    # before any model loads; repeating here covers direct callers and
+    # every coarse_to_fine stage pass — the checks are pure and cheap).
+    validate_fourier_parameterization(
+        fourier_parameterization=params.fourier_parameterization,
+        fourier_decay=params.fourier_decay,
+        image_model=params.image_model,
+        perceptor_backend=params.perceptor_backend,
+        init_spectrum=params.init_spectrum,
+        structure_annealing=params.structure_annealing,
+        animation_mode=params.animation_mode,
+    )
+
     # The init_spectrum knob only governs a visible random start: with an
     # init_image (encoded over the random init in configure_init_image
     # below) or a restore (state reloaded from the .bak) it resolves to the
@@ -289,7 +305,20 @@ def configure_pass(
         else:
             img.lock_palette(params.lock_palette)
     elif params.image_model == "Unlimited Palette":
-        img = RGBImage(params.width, params.height, params.pixel_size, device=device)
+        if params.fourier_parameterization:
+            # same look, 1/f-scaled Fourier spectrum parameterization
+            # (validated above; image_models/fourier.py has the semantics)
+            img = FourierImage(
+                params.width,
+                params.height,
+                params.pixel_size,
+                decay=params.fourier_decay,
+                device=device,
+            )
+        else:
+            img = RGBImage(
+                params.width, params.height, params.pixel_size, device=device
+            )
         img.encode_random(
             init_spectrum=init_spectrum,
             init_spectrum_falloff=init_spectrum_falloff,
@@ -774,6 +803,21 @@ def _hydra_main(cfg: DictConfig):
             # a cycle inside the ramp recomposes toward the OUTGOING scene
             interpolation_steps=params.interpolation_steps,
             n_scenes=len([s for s in params.scenes.split("||") if s.strip()]),
+        )
+
+        # fourier_parameterization rejects every config outside its v1
+        # scope (Unlimited Palette + torch backend, stills, white init)
+        # BEFORE any model loads; the fourier_decay inert-knob rule is
+        # checked unconditionally (configure_pass repeats this for direct
+        # callers and per coarse_to_fine stage).
+        validate_fourier_parameterization(
+            fourier_parameterization=params.fourier_parameterization,
+            fourier_decay=params.fourier_decay,
+            image_model=params.image_model,
+            perceptor_backend=params.perceptor_backend,
+            init_spectrum=params.init_spectrum,
+            structure_annealing=params.structure_annealing,
+            animation_mode=params.animation_mode,
         )
 
         # set up seed for deterministic RNG

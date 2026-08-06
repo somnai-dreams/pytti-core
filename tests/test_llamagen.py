@@ -201,6 +201,11 @@ def test_workhorse_rejects_llamagen_on_mlx_backends():
             init_spectrum="white",
             init_spectrum_falloff=1.0,
             init_spectrum_chroma="full",
+            # read by the fourier validation at configure_pass top
+            fourier_parameterization=False,
+            fourier_decay=1.0,
+            structure_annealing=False,
+            animation_mode="off",
         )
         with pytest.raises(ValueError, match="torch-only"):
             configure_pass(

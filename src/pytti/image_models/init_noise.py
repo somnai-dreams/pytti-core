@@ -76,13 +76,31 @@ INIT_SPECTRUM_CHROMA_CHOICES = ("mono", "natural", "full")
 # RGB covariance of ImageNet): rows map a decorrelated 3-vector to RGB, so
 # unit-variance basis fields come out with natural cross-channel
 # correlations (~0.9 R-G, ~0.8 R-B) — mostly luma, faint chroma. Normalized
-# by the max column norm exactly as lucid does; the per-plane moment
-# rescale downstream erases the global scale either way.
+# by the max column norm exactly as lucid does (imagenet_color_matrix); the
+# per-plane moment rescale downstream erases the global scale either way.
+# Shared: the init_spectrum_chroma='natural' path here and the Fourier
+# parameterization (image_models/fourier.py) both decode through exactly
+# this matrix.
 _COLOR_CORRELATION_SVD_SQRT = (
     (0.26, 0.09, 0.02),
     (0.27, 0.00, -0.05),
     (0.27, -0.09, 0.03),
 )
+
+
+def imagenet_color_matrix(
+    dtype: torch.dtype, device: torch.device | str
+) -> torch.Tensor:
+    """
+    Lucid's normalized ImageNet color matrix: a [3, 3] tensor whose ROWS map
+    a decorrelated basis 3-vector to RGB (rgb_c = sum_k M[c, k] * basis_k;
+    basis axis 0 is the luma-like direction — near-equal RGB weights).
+    Normalized by the max column norm exactly as lucid's
+    color_correlation_normalized. The single shared source for every
+    decorrelated-color path (init chroma 'natural', FourierImage decode).
+    """
+    matrix = torch.tensor(_COLOR_CORRELATION_SVD_SQRT, dtype=dtype, device=device)
+    return matrix / matrix.norm(dim=0).max()
 
 # PixelImage 'natural' chroma: the shaped selection-logit planes are blended
 # toward flat mid-gray by this factor (0.5 + A*(field - 0.5)), shrinking
@@ -247,10 +265,7 @@ def _natural_rgb(raw: torch.Tensor) -> torch.Tensor:
     mu = raw.mean(dim=(-2, -1), keepdim=True)
     sigma = raw.std(dim=(-2, -1), keepdim=True)
     basis = (raw - mu) / sigma.clamp_min(1e-12)
-    matrix = torch.tensor(
-        _COLOR_CORRELATION_SVD_SQRT, dtype=raw.dtype, device=raw.device
-    )
-    matrix = matrix / matrix.norm(dim=0).max()  # lucid's normalization
+    matrix = imagenet_color_matrix(raw.dtype, raw.device)
     rgb = torch.einsum("ck,khw->chw", matrix, basis)
     return _rescale_to_uniform_moments(rgb)
 

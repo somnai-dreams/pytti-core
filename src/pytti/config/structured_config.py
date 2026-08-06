@@ -47,6 +47,18 @@ def _init_spectrum_chroma_validator(self, attribute, value):
     validate_spectrum_chroma(value)
 
 
+def _fourier_decay_validator(self, attribute, value):
+    # deferred import: keeps this schema module import-light; fires at
+    # attrs instantiation (OmegaConf.to_object), long after import time.
+    # fourier_parameterization is defined before this field, so it is set
+    # when the inert-knob check runs.
+    from pytti.image_models.fourier import validate_fourier_decay
+
+    validate_fourier_decay(
+        value, fourier_parameterization=self.fourier_parameterization
+    )
+
+
 def _coarse_stages_validator(self, attribute, value):
     # deferred import: keeps this schema module import-light; fires at
     # attrs instantiation (OmegaConf.to_object), long after import time
@@ -158,6 +170,31 @@ class ConfigSchema:
     init_spectrum_chroma: str = field(
         default="full", validator=_init_spectrum_chroma_validator
     )
+
+    # Fourier parameterization (Unlimited Palette + torch backend only,
+    # stills only — anything else fails loud at startup naming the v1
+    # scope): optimize the image as a 1/f-scaled Fourier spectrum instead
+    # of raw pixels (distill.pub 2018 / lucid fft_image; Aphantasia's port
+    # proved it for CLIP guidance). Low frequencies (composition) move with
+    # large image-space amplitude from step one and texture arrives later,
+    # BY CONSTRUCTION — the structural counterpart to what coarse_to_fine
+    # does with stages. Decode: spectrum x (1/f^fourier_decay) scale ->
+    # irfft2 -> lucid's ImageNet color matrix -> sigmoid. init_spectrum
+    # must stay white (the Fourier init IS 1/f-shaped already);
+    # structure_annealing doesn't compose (pixel-domain planes). Full
+    # semantics: src/pytti/image_models/fourier.py.
+    fourier_parameterization: bool = False
+    # amplitude decay power for the Fourier scale: 1.0 = lucid's
+    # natural-image default; lower = closer to pixel behavior, higher =
+    # softer, more composition-dominant (Aphantasia's "compositional
+    # softness" knob). Shape only: the scale grid is energy-normalized to
+    # the decay-1 level (fourier_scale), so any value in range starts
+    # near-gray and optimizes at any resolution — higher decay reallocates
+    # the optimizer's step budget toward big masses, it does not inflate
+    # contrast. Only meaningful with fourier_parameterization: true (any
+    # other value alongside false is rejected loudly). Validated to
+    # [0.1, 4.0] at compose time.
+    fourier_decay: float = field(default=1.0, validator=_fourier_decay_validator)
 
     width: int = 512
     height: int = 512

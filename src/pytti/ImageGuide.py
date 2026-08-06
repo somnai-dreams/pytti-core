@@ -127,7 +127,10 @@ class DirectImageGuide:
     def __init__(
         self,
         image_rep: DifferentiableImage,
-        embedder: nn.Module,
+        # None = a bare guide with no semantic path (PixelImage's palette
+        # fit, direct-loss-only tests); every embedder read below is
+        # is-not-None guarded already
+        embedder: nn.Module | None,
         optimizer: optim.Optimizer = None,
         lr: float = None,
         params=None,
