@@ -61,6 +61,7 @@ from pytti.Perceptor.Embedder import HDMultiClipEmbedder
 from pytti.Perceptor.Prompt import parse_prompt
 from pytti.prompt_spec import parse_prompt_spec
 from pytti.rotoscoper import ROTOSCOPERS, get_frames
+from pytti.structure_annealing import validate_structure_annealing
 from pytti.warmup import (
     ensure_configs_exist,
     migrate_local_config,
@@ -563,6 +564,15 @@ def run_coarse_to_fine(
             p = copy.deepcopy(params)
             p.width, p.height = w, h
             p.steps_per_scene = splits[idx]
+            # structure_annealing runs in the FINAL stage only: earlier
+            # stages are already structure-liquid (thumbnail canvases, and
+            # every transition re-encodes into a fresh rep — itself a
+            # structural reset), so their small step budgets are spent
+            # rendering, not re-liquifying. The final stage schedules its
+            # cycles within its own split (p.steps_per_scene above), which
+            # do_run pre-validated against the ladder.
+            if stage_number != n_stages:
+                p.structure_annealing = False
             if stage_number > 1:
                 seam = transition_png(stage_number - 1)
                 if resumed_here:
@@ -576,7 +586,12 @@ def run_coarse_to_fine(
                         )
                     stage_init_pil = Image.open(seam).convert("RGB")
                 p.init_image = str(seam)  # names the hold in logs/records
-                p.direct_init_weight = "2"  # structural hold on the previous stage
+                # structural hold on the previous stage. Under
+                # structure_annealing the guide RELEASES this hold at the
+                # first anneal cycle: a weight-2 full-band pull toward the
+                # pre-anneal composition would drag the re-liquified band
+                # straight back and make the cycles inert.
+                p.direct_init_weight = "2"
                 p.semantic_init_weight = ""  # validated off for coarse_to_fine
 
             logger.info(
@@ -734,6 +749,32 @@ def _hydra_main(cfg: DictConfig):
             )
             # fail loud on a bad step split
             stage_steps(params.steps_per_scene, params.coarse_stages)
+
+        # structure_annealing rejects every config it has no cycle semantics
+        # for BEFORE any model loads (the anneal_* knobs are checked
+        # unconditionally: a non-default value on a run that ignores them is
+        # a config lie). Under coarse_to_fine the cycles run in the FINAL
+        # stage only, so the schedule must fit that stage's own step budget.
+        validate_structure_annealing(
+            structure_annealing=params.structure_annealing,
+            anneal_cycles=params.anneal_cycles,
+            anneal_strength=params.anneal_strength,
+            anneal_band=params.anneal_band,
+            anneal_source=params.anneal_source,
+            image_model=params.image_model,
+            animation_mode=params.animation_mode,
+            auto_stop=params.auto_stop,
+            optimizer=params.optimizer,
+            steps_budget=(
+                stage_steps(params.steps_per_scene, params.coarse_stages)[-1]
+                if params.coarse_to_fine
+                else params.steps_per_scene
+            ),
+            # a multi-scene crossfade must end before the first cycle —
+            # a cycle inside the ramp recomposes toward the OUTGOING scene
+            interpolation_steps=params.interpolation_steps,
+            n_scenes=len([s for s in params.scenes.split("||") if s.strip()]),
+        )
 
         # set up seed for deterministic RNG
         if params.seed is None:

@@ -55,6 +55,22 @@ def _coarse_stages_validator(self, attribute, value):
     validate_coarse_stages(coarse_to_fine=self.coarse_to_fine, coarse_stages=value)
 
 
+def _anneal_validator(check_name):
+    # deferred import, same pattern as above. Each anneal_* field checks
+    # its own bounds/choices AND the inert-knob rule (a non-default value
+    # alongside structure_annealing: false is a config lie — the
+    # coarse_stages rule); structure_annealing is defined before these
+    # fields, so self.structure_annealing is set when they validate.
+    def validator(self, attribute, value):
+        import pytti.structure_annealing as sa
+
+        getattr(sa, check_name)(
+            value, structure_annealing=self.structure_annealing
+        )
+
+    return validator
+
+
 @define(auto_attribs=True)
 class AudioFilterConfig:
     variable_name: str = ""
@@ -200,6 +216,55 @@ class ConfigSchema:
     # 4 -> 15/20/25/40 (table in src/pytti/coarse_to_fine.py; needs
     # steps_per_scene >= 3 * coarse_stages).
     coarse_stages: int = field(default=2, validator=_coarse_stages_validator)
+
+    # Structure annealing: periodically re-liquify ONLY the low-frequency
+    # band of the image (FFT-masked blend toward shaped noise or toward the
+    # image mean) so CLIP gets fresh votes on composition while accumulated
+    # mid/high-frequency detail survives — a diffusion-style structure
+    # schedule without a denoiser, generalizing coarse_to_fine's single
+    # reset (full semantics + decisions: src/pytti/structure_annealing.py).
+    # Cycles are evenly spaced through each scene's steps, the last ~35%
+    # of steps stay anneal-free (protected tail), and cycle strength
+    # decays geometrically from anneal_strength to 0.1x of it. Still mode
+    # only; Limited Palette anneals the value plane only (palette +
+    # selection logits untouched); Unlimited Palette anneals all channels.
+    # Fails loud for VQGAN/LlamaGen (latent state), auto_stop (deliberate
+    # loss resets break plateau semantics), optimizer=adamw_sf (a
+    # host-side overwrite desynchronizes its Polyak average), and a
+    # multi-scene crossfade overlapping the first cycle (the re-liquified
+    # band would recompose toward the OUTGOING scene). With
+    # coarse_to_fine, cycles run in the FINAL stage only, within that
+    # stage's own step budget — and any direct init hold (including the
+    # stage's weight-2 hold on the previous stage's image) is RELEASED at
+    # the first cycle, since a full-band pull toward a pre-anneal image
+    # would cancel the re-liquification.
+    structure_annealing: bool = False
+    # number of re-liquify events across the run (each needs >= 5 steps of
+    # optimization before the next / the protected tail — too-small step
+    # budgets fail loud)
+    anneal_cycles: int = field(
+        default=3, validator=_anneal_validator("validate_anneal_cycles")
+    )
+    # low-band blend factor at the FIRST cycle, in (0, 1]; later cycles
+    # decay geometrically to 0.1x of it at the last. Zero is rejected — a
+    # zero-strength cycle is annealing that does nothing (inert-knob rule)
+    anneal_strength: float = field(
+        default=0.5, validator=_anneal_validator("validate_anneal_strength")
+    )
+    # fraction of the Nyquist radius below which frequencies re-liquify
+    # (raised-cosine edge — hard masks ring; DC/mean is always preserved)
+    anneal_band: float = field(
+        default=0.15, validator=_anneal_validator("validate_anneal_band")
+    )
+    # noise = replace the band with shaped pink noise (falloff from
+    # init_spectrum_falloff; chroma honors an explicit init_spectrum_chroma
+    # of mono/natural, while the back-compat default 'full' maps to mono —
+    # repeated per-cycle injection of independent per-channel fields is the
+    # measured chroma-leak pathology);
+    # blur = decay the band toward the image mean (zero foreign content)
+    anneal_source: str = field(
+        default="noise", validator=_anneal_validator("validate_anneal_source")
+    )
 
     learning_rate: float | None = None
     reset_lr_each_frame: bool = True

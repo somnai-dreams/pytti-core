@@ -561,3 +561,41 @@ class MLXStillEngine:
         else:
             state_dict = rgb_state_dict_from_params(self._params)
         image_rep.load_state_dict(state_dict)
+
+    def import_params(self, image_rep) -> None:
+        """
+        The inverse of :meth:`write_back`: load the torch module's CURRENT
+        state into the live params tree — the structure-annealing seam
+        (pytti/structure_annealing.py): a host-side intervention edits the
+        torch module between compiled steps and this brings it back. The
+        compiled step threads ``self._params`` through ``inputs=/outputs=``,
+        so VALUES may change but structure must not: the key set and every
+        shape are checked against the live tree, fail loud on any drift.
+        Adam moments and ``mx.random.state`` are untouched (moments are
+        KEPT through an anneal cycle by design — see the anneal module's
+        docstring for the tradeoff).
+        """
+        if image_rep is not self._image_rep:
+            raise ValueError(
+                "import_params called with a different image_rep than the "
+                "one this engine was built from"
+            )
+        state_dict = image_rep.state_dict()
+        if self._image_kind == "pixel":
+            tree = pixel_params_from_state_dict(state_dict)
+        else:
+            tree = rgb_params_from_state_dict(state_dict)
+        if set(tree) != set(self._params):
+            raise ValueError(
+                "import_params key drift: torch module has "
+                f"{sorted(tree)}, the live tree has {sorted(self._params)} "
+                "— the compiled step's state structure must not change"
+            )
+        for key, arr in tree.items():
+            if arr.shape != self._params[key].shape:
+                raise ValueError(
+                    f"import_params shape drift at {key!r}: "
+                    f"{arr.shape} != {self._params[key].shape} — the "
+                    "compiled step's state structure must not change"
+                )
+        self._params.update(tree)

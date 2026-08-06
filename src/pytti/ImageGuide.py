@@ -20,6 +20,7 @@ from pytti import (
 from pytti.AudioParse import SpectralAudioParser
 from pytti.image_models.differentiable_image import DifferentiableImage
 from pytti.image_models.pixel import PixelImage
+from pytti.image_models.rgb_image import RGBImage
 from pytti.LossAug.TVLossClass import TVLoss
 from pytti.phase_scheduling import (
     init_weight_scale,
@@ -28,6 +29,7 @@ from pytti.phase_scheduling import (
     tv_weight_scale,
 )
 from pytti.rotoscoper import update_rotoscopers
+from pytti.structure_annealing import anneal_image_rep, anneal_schedule
 from pytti.Transforms import animate_video_source, zoom_2d, zoom_3d
 
 
@@ -190,6 +192,50 @@ class DirectImageGuide:
                 "meaning there. Set animation_mode: off or auto_stop: false."
             )
 
+        # structure annealing (pytti/structure_annealing.py): scene-local
+        # step -> blend strength for every scheduled re-liquify cycle, or
+        # None when off. The schedule is a pure function of the config, so
+        # restores replay the remaining cycles at the same steps. workhorse
+        # validates the full config surface before any model loads; the
+        # checks here repeat the ones a directly-constructed guide could
+        # violate (fail loud, never a silent no-op knob).
+        self.anneal_schedule: dict[int, float] | None = None
+        if params is not None and bool(params.get("structure_annealing", False)):
+            if params.animation_mode != "off":
+                raise ValueError(
+                    "structure_annealing schedules re-liquify cycles over a "
+                    "scene's steps; animation_mode="
+                    f"{params.animation_mode!r} re-anchors the image every "
+                    "frame, so the schedule has no defined meaning there. "
+                    "Set animation_mode: off or structure_annealing: false."
+                )
+            if bool(params.get("auto_stop", False)):
+                raise ValueError(
+                    "auto_stop judges TOTAL-loss plateaus; "
+                    "structure_annealing deliberately resets the loss "
+                    "mid-run, so a plateau verdict has no defined meaning. "
+                    "Set auto_stop: false or structure_annealing: false."
+                )
+            if params.get("optimizer", "adam") != "adam":
+                raise ValueError(
+                    "structure_annealing supports optimizer=adam only "
+                    "(schedule-free parameters entangle a Polyak average a "
+                    "host-side overwrite would desynchronize). Set "
+                    "optimizer: adam or structure_annealing: false."
+                )
+            if not isinstance(image_rep, (PixelImage, RGBImage)):
+                raise ValueError(
+                    "structure_annealing has no re-liquify path for "
+                    f"{type(image_rep).__name__}: only PixelImage and "
+                    "RGBImage hold pixel-domain state (latent re-encode is "
+                    "out of scope in v1). Set structure_annealing: false."
+                )
+            self.anneal_schedule = anneal_schedule(
+                int(params.steps_per_scene),
+                int(params.get("anneal_cycles", 3)),
+                float(params.get("anneal_strength", 0.5)),
+            )
+
         if lr is None:
             lr = image_rep.lr
         self.lr = lr
@@ -307,6 +353,25 @@ class DirectImageGuide:
         after the interpolation ramp — a scene never stops mid-crossfade.
         """
         params = self.params
+        if (
+            self.anneal_schedule is not None
+            and interp_steps > 0
+            and interp_prompts is not prompts
+            and min(self.anneal_schedule) < interp_steps
+        ):
+            # backstop for directly-constructed guides — workhorse rejects
+            # this at config time (validate_structure_annealing). Scene 1
+            # and coarse_to_fine pass the SAME list for both prompt args
+            # (a self-crossfade), which is why identity is the test here.
+            raise ValueError(
+                "structure_annealing: the first anneal cycle (scene step "
+                f"{min(self.anneal_schedule)}) falls inside this scene's "
+                f"{interp_steps}-step interpolation crossfade, where the "
+                "outgoing scene's prompts still dominate the loss — the "
+                "re-liquified band would recompose toward the wrong scene. "
+                "Lower interpolation_steps or anneal_cycles, or raise "
+                "steps_per_scene."
+            )
         auto_stop = params is not None and bool(params.get("auto_stop", False))
         if auto_stop:
             window_steps = int(params.get("auto_stop_window", 50))
@@ -328,6 +393,19 @@ class DirectImageGuide:
         steps_run = 0
         for i in tqdm(range(n_steps)):
             self.update(i + i_offset, i + skipped_steps)
+            if self.anneal_schedule is not None:
+                # scene-local step, matching the schedule's domain (update()
+                # above already saved this step's frame, so the cycle shows
+                # from the NEXT saved frame on)
+                scene_step = i + skipped_steps
+                if scene_step >= min(self.anneal_schedule):
+                    # the release is a function of scene POSITION, not of a
+                    # cycle event, so a restore that resumes past the first
+                    # cycle stays hold-free like the uninterrupted run
+                    self._release_init_holds(i + i_offset)
+                strength = self.anneal_schedule.get(scene_step)
+                if strength is not None:
+                    self._apply_structure_anneal(i + i_offset, strength)
             losses = self.train(
                 i + skipped_steps,
                 prompts,
@@ -440,6 +518,70 @@ class DirectImageGuide:
                 )
             self._phase_palette_locked = locked
         return 0.0 if locked else 1.0
+
+    def _release_init_holds(self, global_step: int) -> None:
+        """
+        Disable every direct init-hold loss, idempotently (structure
+        annealing only — pytti/structure_annealing.py). A direct init hold
+        is a full-band pull toward a PRE-anneal image: left enabled it
+        drags the re-liquified band straight back within a few steps and
+        the cycles are inert (coarse_to_fine holds the previous stage's
+        composition at weight 2 in exactly the stage the cycles run in).
+        run_steps calls this from the first cycle's scene step ONWARD —
+        position-based, so a restore resuming past the first cycle is
+        hold-free exactly like the uninterrupted run. The hold has done
+        its settling work by then; from here on CLIP owns composition.
+        Both backends read ``enabled`` per step (mlx_full re-traces once).
+        """
+        released = [aug for aug in (self.init_augs or ()) if aug.enabled]
+        if released:
+            for aug in released:
+                aug.set_enabled(False)
+            logger.info(
+                "structure_annealing: released the direct init hold at "
+                f"step {global_step} "
+                f"({', '.join(str(aug) for aug in released)}) — a hold "
+                "toward the pre-anneal image would cancel the cycles"
+            )
+
+    def _apply_structure_anneal(self, global_step: int, strength: float) -> None:
+        """
+        One structure-annealing cycle (pytti/structure_annealing.py): blend
+        the image's low-frequency band toward the configured source at
+        ``strength``, releasing any direct init hold at the first cycle
+        (a full-band pull toward a pre-anneal image would cancel the
+        re-liquification — see the anneal module's docstring). Torch path:
+        the live parameters are edited in place (identity preserved, so
+        Adam's moments stay attached — KEPT through the cycle by design).
+        mlx_full: the same torch-side operation runs as a host intervention
+        between compiled steps — export the params tree into the torch
+        module, anneal it, import it back; the engine's Adam state and RNG
+        stream are untouched.
+        """
+        params = self.params
+        if params is None:
+            raise RuntimeError(
+                "_apply_structure_anneal reached with params=None — the "
+                "anneal schedule is only ever built from a params config"
+            )
+        if self.mlx_engine is not None:
+            self.mlx_engine.write_back(self.image_rep)
+        anneal_image_rep(
+            self.image_rep,
+            strength=strength,
+            band=float(params.get("anneal_band", 0.15)),
+            source=str(params.get("anneal_source", "noise")),
+            init_spectrum_falloff=float(params.get("init_spectrum_falloff", 1.0)),
+            init_spectrum_chroma=str(params.get("init_spectrum_chroma", "full")),
+        )
+        if self.mlx_engine is not None:
+            self.mlx_engine.import_params(self.image_rep)
+        logger.info(
+            f"structure_annealing: re-liquified the low band at step "
+            f"{global_step} (strength {strength:.3f}, "
+            f"band {float(params.get('anneal_band', 0.15)):g}, "
+            f"source {params.get('anneal_source', 'noise')})"
+        )
 
     def train(
         self,
