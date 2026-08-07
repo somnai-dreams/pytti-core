@@ -65,8 +65,13 @@ callers):
 
 ``get_image_tensor``/``set_image_tensor`` still work (they route through
 the same decode / inverse-FFT pipeline), so anything pixel-domain that
-reaches them behaves honestly rather than crashing — but no v1 config path
-uses them (the animation guard above).
+reaches them behaves honestly rather than crashing. One config path uses
+them: manifold_projection's cycles (pytti/manifold_projection.py) decode
+to pixels, blend with the VQ projection, and re-encode — a between-steps
+round-trip through exactly this pipeline (unlike annealing, which is
+rejected above, the projection carries no foreign content, so the
+spectral-optimizer interaction is the benign one: a small pixel-domain
+correction re-expressed as spectrum coefficients).
 
 Seeding contract: ``encode_random`` draws real then imag via the global
 torch RNG only, so ``torch.manual_seed(params.seed)`` upstream gives

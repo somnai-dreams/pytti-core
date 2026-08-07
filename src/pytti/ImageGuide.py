@@ -19,9 +19,16 @@ from pytti import (
 )
 from pytti.AudioParse import SpectralAudioParser
 from pytti.image_models.differentiable_image import DifferentiableImage
+from pytti.image_models.fourier import FourierImage
 from pytti.image_models.pixel import PixelImage
 from pytti.image_models.rgb_image import RGBImage
 from pytti.LossAug.TVLossClass import TVLoss
+from pytti.manifold_projection import (
+    PROJECTION_STRIDES,
+    load_projection_model,
+    project_image_rep,
+    projection_steps,
+)
 from pytti.phase_scheduling import (
     init_weight_scale,
     palette_locked,
@@ -195,6 +202,20 @@ class DirectImageGuide:
                 "meaning there. Set animation_mode: off or auto_stop: false."
             )
 
+        # one between-steps intervention at a time in v1: checked BEFORE
+        # either schedule builds, so the combo error names the combo
+        # instead of whichever schedule happens to fail first
+        if (
+            params is not None
+            and bool(params.get("structure_annealing", False))
+            and bool(params.get("manifold_projection", False))
+        ):
+            raise ValueError(
+                "structure_annealing + manifold_projection is unsupported: "
+                "one between-steps intervention at a time in v1. Set "
+                "structure_annealing: false or manifold_projection: false."
+            )
+
         # structure annealing (pytti/structure_annealing.py): scene-local
         # step -> blend strength for every scheduled re-liquify cycle, or
         # None when off. The schedule is a pure function of the config, so
@@ -237,6 +258,66 @@ class DirectImageGuide:
                 int(params.steps_per_scene),
                 int(params.get("anneal_cycles", 3)),
                 float(params.get("anneal_strength", 0.5)),
+            )
+
+        # manifold projection (pytti/manifold_projection.py): the
+        # scene-local steps VQ-projection cycles fire at, or None when
+        # off. The schedule is a pure function of the config, so restores
+        # replay the remaining cycles at the same steps. workhorse
+        # validates the full config surface before any model loads; the
+        # checks here repeat the ones a directly-constructed guide could
+        # violate (fail loud, never a silent no-op knob). The tokenizer
+        # itself loads lazily at the FIRST cycle.
+        self.projection_schedule: tuple[int, ...] | None = None
+        self._projection_model = None
+        if params is not None and bool(params.get("manifold_projection", False)):
+            if params.animation_mode != "off":
+                raise ValueError(
+                    "manifold_projection schedules projection cycles over "
+                    "a scene's steps; animation_mode="
+                    f"{params.animation_mode!r} re-anchors the image every "
+                    "frame, so the schedule has no defined meaning there. "
+                    "Set animation_mode: off or manifold_projection: false."
+                )
+            if bool(params.get("auto_stop", False)):
+                raise ValueError(
+                    "auto_stop judges TOTAL-loss plateaus; "
+                    "manifold_projection deliberately edits the image on a "
+                    "schedule, so a plateau verdict has no defined "
+                    "meaning. Set auto_stop: false or "
+                    "manifold_projection: false."
+                )
+            if params.get("optimizer", "adam") != "adam":
+                raise ValueError(
+                    "manifold_projection supports optimizer=adam only "
+                    "(schedule-free parameters entangle a Polyak average a "
+                    "host-side overwrite would desynchronize). Set "
+                    "optimizer: adam or manifold_projection: false."
+                )
+            if not isinstance(image_rep, (PixelImage, RGBImage, FourierImage)):
+                raise ValueError(
+                    "manifold_projection has no projection path for "
+                    f"{type(image_rep).__name__}: only PixelImage, "
+                    "RGBImage, and FourierImage hold pixel-domain canvases "
+                    "(VQGAN/LlamaGen state already lives on a decoder "
+                    "manifold). Set manifold_projection: false."
+                )
+            stride = PROJECTION_STRIDES[
+                str(params.get("projection_model", "ds8"))
+            ]
+            side_x, side_y = image_rep.image_shape
+            logical_x = side_x // int(image_rep.scale)
+            logical_y = side_y // int(image_rep.scale)
+            if logical_x % stride or logical_y % stride:
+                raise ValueError(
+                    "manifold_projection with projection_model="
+                    f"{params.get('projection_model', 'ds8')!r} needs the "
+                    f"logical canvas to be a multiple of {stride}, got "
+                    f"{logical_x}x{logical_y}."
+                )
+            self.projection_schedule = projection_steps(
+                int(params.steps_per_scene),
+                int(params.get("projection_every", 30)),
             )
 
         if lr is None:
@@ -409,6 +490,15 @@ class DirectImageGuide:
                 strength = self.anneal_schedule.get(scene_step)
                 if strength is not None:
                     self._apply_structure_anneal(i + i_offset, strength)
+            if (
+                self.projection_schedule is not None
+                and i + skipped_steps in self.projection_schedule
+            ):
+                # scene-local step, matching the schedule's domain; like an
+                # anneal cycle, the projection applies BEFORE this step
+                # trains (update() above already saved this step's frame,
+                # so the cycle shows from the NEXT saved frame on)
+                self._apply_manifold_projection(i + i_offset)
             losses = self.train(
                 i + skipped_steps,
                 prompts,
@@ -584,6 +674,52 @@ class DirectImageGuide:
             f"{global_step} (strength {strength:.3f}, "
             f"band {float(params.get('anneal_band', 0.15)):g}, "
             f"source {params.get('anneal_source', 'noise')})"
+        )
+
+    def _apply_manifold_projection(self, global_step: int) -> None:
+        """
+        One manifold-projection cycle (pytti/manifold_projection.py):
+        decode the canvas, run it through the frozen LlamaGen VQ tokenizer
+        round-trip, and blend the projected image back at
+        projection_strength. Unlike an anneal cycle this PRESERVES the
+        canvas's own structure — it only pulls it onto the decoder's
+        natural-image manifold — so direct init holds are NOT released
+        (there is no re-liquification for a hold to cancel; the hold and
+        the projection disagree only about the noise being removed, and
+        the projection reapplies every cycle). The tokenizer loads lazily
+        at the FIRST cycle (frozen, eval, no grad; workhorse frees it at
+        run end). Torch path: parameters edited in place (identity
+        preserved, Adam moments stay attached — the annealing decision).
+        mlx_full: the same torch-side operation runs as a host
+        intervention between compiled steps through the annealing seam —
+        engine write_back -> project -> import_params; the engine's Adam
+        state and RNG stream are untouched (the projection consumes NO
+        RNG, so seeded runs reproduce and pre-cycle steps stay bit-
+        identical to a projection-free run).
+        """
+        params = self.params
+        if params is None:
+            raise RuntimeError(
+                "_apply_manifold_projection reached with params=None — the "
+                "projection schedule is only ever built from a params config"
+            )
+        if self._projection_model is None:
+            self._projection_model = load_projection_model(
+                str(params.get("projection_model", "ds8")),
+                device=self.image_rep.device,
+            )
+        strength = float(params.get("projection_strength", 0.5))
+        if self.mlx_engine is not None:
+            self.mlx_engine.write_back(self.image_rep)
+        project_image_rep(
+            self.image_rep, strength=strength, model=self._projection_model
+        )
+        if self.mlx_engine is not None:
+            self.mlx_engine.import_params(self.image_rep)
+        logger.info(
+            f"manifold_projection: projected the canvas onto the "
+            f"{params.get('projection_model', 'ds8')} decoder manifold at "
+            f"step {global_step} (strength {strength:g})"
         )
 
     def train(

@@ -58,6 +58,11 @@ from pytti.LossAug.LossOrchestratorClass import (
     configure_optical_flows,
     configure_stabilization_augs,
 )
+from pytti.manifold_projection import (
+    free_projection_model,
+    validate_manifold_projection,
+    validate_projection_dims,
+)
 from pytti.Perceptor import load_clip
 from pytti.Perceptor.Embedder import HDMultiClipEmbedder
 from pytti.Perceptor.Prompt import parse_prompt
@@ -599,9 +604,13 @@ def run_coarse_to_fine(
             # structural reset), so their small step budgets are spent
             # rendering, not re-liquifying. The final stage schedules its
             # cycles within its own split (p.steps_per_scene above), which
-            # do_run pre-validated against the ladder.
+            # do_run pre-validated against the ladder. manifold_projection
+            # follows the same precedent: every non-final transition
+            # already re-encodes the canvas (a projection-like reset), so
+            # its cycles run in the final stage only.
             if stage_number != n_stages:
                 p.structure_annealing = False
+                p.manifold_projection = False
             if stage_number > 1:
                 seam = transition_png(stage_number - 1)
                 if resumed_here:
@@ -805,6 +814,33 @@ def _hydra_main(cfg: DictConfig):
             n_scenes=len([s for s in params.scenes.split("||") if s.strip()]),
         )
 
+        # manifold_projection rejects every config it has no cycle
+        # semantics for BEFORE any model loads (the projection_* knobs are
+        # checked unconditionally: a non-default value on a run that
+        # ignores them is a config lie). Under coarse_to_fine the
+        # projections run in the FINAL stage only (the annealing
+        # precedent), so the schedule must fit that stage's own budget.
+        # AUTO-aspect dims (-1) defer the stride check to the re-validation
+        # after load_init_image resolves them, below.
+        validate_manifold_projection(
+            manifold_projection=params.manifold_projection,
+            projection_every=params.projection_every,
+            projection_strength=params.projection_strength,
+            projection_model=params.projection_model,
+            image_model=params.image_model,
+            animation_mode=params.animation_mode,
+            structure_annealing=params.structure_annealing,
+            auto_stop=params.auto_stop,
+            optimizer=params.optimizer,
+            steps_budget=(
+                stage_steps(params.steps_per_scene, params.coarse_stages)[-1]
+                if params.coarse_to_fine
+                else params.steps_per_scene
+            ),
+            width=params.width,
+            height=params.height,
+        )
+
         # fourier_parameterization rejects every config outside its v1
         # scope (Unlimited Palette + torch|mlx_full backend, stills, white init)
         # BEFORE any model loads; the fourier_decay inert-knob rule is
@@ -884,6 +920,13 @@ def _hydra_main(cfg: DictConfig):
             )
 
         params.height, params.width = height, width
+
+        # the AUTO-aspect leg of the config-time stride check: dims that
+        # were -1 above are now resolved from the init image / video source
+        if params.manifold_projection:
+            validate_projection_dims(
+                params.width, params.height, params.projection_model
+            )
 
         # Phase 3/4 - filespace + base_name (shared by every pass, so
         # coarse_to_fine's two stages number one continuous sequence)
@@ -1005,6 +1048,11 @@ def _hydra_main(cfg: DictConfig):
     except RuntimeError:
         print_vram_usage()
         raise
+    finally:
+        # the manifold-projection tokenizer is a run-scoped singleton
+        # (loaded lazily at the first projection); release it however the
+        # run ended. No-op when it never loaded.
+        free_projection_model()
 
 
 def _main():

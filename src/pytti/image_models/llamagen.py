@@ -67,6 +67,13 @@ def load_llamagen_model(checkpoint_path, model_name):
         )
     model.load_state_dict(state, strict=True)
     model.eval().requires_grad_(False)
+    # Module.requires_grad_ only touches parameters(): the vendored
+    # quantizer registers `codebook_used` as an nn.Parameter BUFFER
+    # (vendor/llamagen/vq_model.py), which would otherwise keep
+    # requires_grad=True — freeze buffers too, so the frozen contract
+    # (LlamaGenImage, manifold_projection) holds for every tensor.
+    for buffer in model.buffers():
+        buffer.requires_grad_(False)
     return model
 
 

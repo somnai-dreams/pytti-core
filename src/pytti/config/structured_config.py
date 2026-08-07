@@ -83,6 +83,21 @@ def _anneal_validator(check_name):
     return validator
 
 
+def _projection_validator(check_name):
+    # deferred import, the _anneal_validator pattern verbatim: each
+    # projection_* field checks its own bounds/choices AND the inert-knob
+    # rule against manifold_projection, which is defined before these
+    # fields so self.manifold_projection is set when they validate.
+    def validator(self, attribute, value):
+        import pytti.manifold_projection as mp
+
+        getattr(mp, check_name)(
+            value, manifold_projection=self.manifold_projection
+        )
+
+    return validator
+
+
 @define(auto_attribs=True)
 class AudioFilterConfig:
     variable_name: str = ""
@@ -301,6 +316,52 @@ class ConfigSchema:
     # blur = decay the band toward the image mean (zero foreign content)
     anneal_source: str = field(
         default="noise", validator=_anneal_validator("validate_anneal_source")
+    )
+
+    # Manifold projection: every projection_every steps, decode the canvas,
+    # run it through the FROZEN LlamaGen VQ tokenizer round-trip
+    # (encoder -> quantize -> decoder), and blend the projected image back
+    # at projection_strength — projected gradient descent onto the
+    # decoder's natural-image manifold (full semantics + decisions:
+    # src/pytti/manifold_projection.py). Unlike structure_annealing (which
+    # re-liquifies with foreign noise, and was falsified on good starts)
+    # the projection PRESERVES the canvas's own structure — it only cleans
+    # accumulated speckle / unclean color onto the manifold, keeping the
+    # pytti texture character. The last ~35% of each scene's steps stay
+    # projection-free (structure_annealing's protected tail, same
+    # constant) so character settles; no strength decay in v1 (the
+    # projection is gentle by construction). Pixel-domain canvases only:
+    # Limited Palette (light re-encode — the projection's brightness
+    # delta lands on the value plane at projection_strength; palette +
+    # selection logits untouched), Unlimited Palette, and
+    # fourier_parameterization (round-trips through the spectrum encode).
+    # Fails loud for VQGAN/LlamaGen image models (their state already
+    # lives on a decoder manifold), animation, auto_stop (a scheduled
+    # image edit breaks plateau semantics), optimizer=adamw_sf (host-side
+    # overwrite desynchronizes its Polyak average), and
+    # structure_annealing (one between-steps intervention at a time).
+    # width/height must be multiples of the tokenizer stride (ds8: 8,
+    # ds16: 16). With coarse_to_fine, projections run in the FINAL stage
+    # only (the annealing precedent). The tokenizer loads lazily at the
+    # first projection (~281-288 MB fp32) and is freed at run end.
+    manifold_projection: bool = False
+    # steps between projections (scene-local; the first fires at step
+    # projection_every, the last at or before the protected-tail boundary
+    # — budgets too small for even one projection fail loud)
+    projection_every: int = field(
+        default=30, validator=_projection_validator("validate_projection_every")
+    )
+    # blend factor toward the projected image, in (0, 1]: 1 = full
+    # replace. Zero is rejected — a zero-strength projection changes
+    # nothing while still paying a VQ round-trip (inert-knob rule)
+    projection_strength: float = field(
+        default=0.5,
+        validator=_projection_validator("validate_projection_strength"),
+    )
+    # which frozen LlamaGen VQ tokenizer projects: ds8 (stride 8, finer
+    # texture — the battery's structure king) or ds16 (stride 16)
+    projection_model: str = field(
+        default="ds8", validator=_projection_validator("validate_projection_model")
     )
 
     learning_rate: float | None = None
