@@ -1,0 +1,19 @@
+# Modal smoke battery — scripts/modal_eval.py --tier smoke ONLY.
+#
+# One prompt, one seed: paired with the 'smoke' tier (128px, 20 steps) and
+# two legs (a plain leg + an init_from chained leg) this yields exactly TWO
+# cells — the minimal paid end-to-end exercise of the Modal render path
+# (wave scheduling, byte-carried chained init, local download layout,
+# judging). It has NO quality authority; the real battery is battery.yaml.
+
+seeds: [2]
+
+prompts:
+  - id: smoke-temple
+    category: smoke
+    aspect: '1:1'
+    scenes: an ancient stone temple overgrown with bioluminescent vines, mist, dramatic lighting
+    rationale: >-
+      Known-good battery prompt (temple-lit) reused for the Modal smoke:
+      dense scene language separates a live render from a dead one even at
+      128px/20 steps, and the local judges have an anchor to score.
